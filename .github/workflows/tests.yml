@@ -1,0 +1,34 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unit-tests:
+    name: unit tests (${{ matrix.os }} / py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # 核心零第三方依赖：不需要 pip install
+      - name: Run offline unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Byte-compile all modules
+        run: python -m compileall -q paper_radar
+
+      - name: Check CLI entrypoints respond
+        run: |
+          python -m paper_radar sources
+          python -m paper_radar topic list

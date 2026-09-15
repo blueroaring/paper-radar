@@ -1,0 +1,10 @@
+# paper-radar 的**核心运行时零第三方依赖**：只用到 Python 3.10+ 标准库
+# （urllib / sqlite3 / smtplib / http.server / xml.etree / threading）。
+#
+# 因此这个文件默认是空的 —— 直接 `python -m paper_radar serve` 即可运行。
+#
+# 下列为**完全可选**的增强项，按需取消注释：
+#
+# PyYAML>=6.0        # 如果你更想用 YAML 写配置（config.py 会自动识别 config.yaml）
+# pypdf>=4.0         # 解析本地 PDF 全文，用于"用几篇论文"时读取更完整的摘要
+# pytest>=8.0        # 运行 tests/ 下的测试（unittest 也能跑，不需要它）

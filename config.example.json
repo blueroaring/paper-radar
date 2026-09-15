@@ -1,0 +1,222 @@
+{
+  "_readme": [
+    "paper-radar 的全部可调参数都在这里。复制成 config.json 后修改；config.json 已被 .gitignore。",
+    "密钥请放 config.json（或 secrets.json / 环境变量 PAPER_RADAR_*），永远不要提交到仓库。",
+    "本文件是代码的内置默认值来源：删掉某个键也能跑，只是用不了对应能力。"
+  ],
+
+  "app": {
+    "name": "paper-radar",
+    "host": "127.0.0.1",
+    "port": 8848,
+    "data_dir": "data",
+    "db_name": "paper_radar.db",
+    "language": "zh",
+    "timezone": "Asia/Shanghai"
+  },
+
+  "sources": {
+    "_comment": "默认启用这 4 个：任何网络下都能用。dblp / semantic_scholar 需要你的网络环境能直连（见 README 的『数据源可用性』）。",
+    "enabled": ["arxiv", "google_scholar", "openalex", "crossref"],
+    "per_source_limit": 20,
+    "http": {
+      "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      "timeout": 25,
+      "retries": 3,
+      "backoff": 1.8,
+      "proxy": "",
+      "host_timeout": {
+        "export.arxiv.org": 12,
+        "scholar.google.com": 20
+      },
+      "host_retries": {
+        "api.semanticscholar.org": 1,
+        "export.arxiv.org": 1
+      },
+      "min_interval": {
+        "default": 0.8,
+        "scholar.google.com": 5.0,
+        "export.arxiv.org": 3.0,
+        "rss.arxiv.org": 1.0,
+        "api.semanticscholar.org": 3.5,
+        "api.crossref.org": 0.5,
+        "api.openalex.org": 0.4,
+        "dblp.org": 1.5
+      }
+    },
+    "arxiv": {
+      "endpoint": "https://export.arxiv.org/api/query",
+      "categories": ["cs.NI", "cs.DC", "cs.AR", "cs.PF", "cs.ET", "cs.LG", "cs.CR"],
+      "sort_by": "relevance",
+      "rss_fallback": true,
+      "rss_url_template": "https://rss.arxiv.org/rss/{category}"
+    },
+    "google_scholar": {
+      "endpoint": "https://scholar.google.com/scholar",
+      "hl": "en",
+      "max_pages": 1,
+      "results_per_page": 20
+    },
+    "openalex": {
+      "endpoint": "https://api.openalex.org/works",
+      "mailto": "",
+      "cs_concept_id": "C41008148",
+      "cs_only": true
+    },
+    "crossref": {
+      "endpoint": "https://api.crossref.org/works",
+      "mailto": "",
+      "types": ["journal-article", "proceedings-article", "book-chapter", "posted-content"]
+    },
+    "semantic_scholar": {
+      "endpoint": "https://api.semanticscholar.org/graph/v1/paper/search",
+      "api_key": "",
+      "fields_of_study": "Computer Science",
+      "fields": "title,abstract,year,venue,publicationVenue,externalIds,url,citationCount,authors,publicationTypes,fieldsOfStudy"
+    },
+    "dblp": {
+      "endpoint": "https://dblp.org/search/publ/api",
+      "format": "json",
+      "completesearch": "1"
+    }
+  },
+
+  "search": {
+    "max_candidates": 150,
+    "top_n": 15,
+    "cs_only": true,
+    "year_from": null,
+    "year_lookback": 5,
+    "min_citations": 0,
+    "exclude_venues": [],
+    "require_title_keyword": false,
+    "weights": {
+      "relevance": 1.0,
+      "recency": 0.35,
+      "citations": 0.22,
+      "venue": 0.18
+    },
+    "recency_half_life_years": 2.5,
+    "citation_saturation": 200,
+    "llm_relevance_weight": 0.45,
+    "rerank": true,
+    "tier_score": { "S": 1.0, "A": 0.75, "B": 0.5, "unknown": 0.2 },
+    "venue_tiers": {
+      "S": [
+        "SIGCOMM", "NSDI", "OSDI", "SOSP", "ISCA", "MICRO", "ASPLOS", "HPCA", "SIGMOD",
+        "VLDB", "PVLDB", "STOC", "FOCS", "SIGIR", "KDD", "NeurIPS", "ICML", "ICLR", "CVPR",
+        "CCS", "S&P", "USENIX Security", "NDSS", "FAST", "ATC", "EuroSys", "INFOCOM",
+        "Nature", "Science", "Proceedings of the IEEE", "JSAC", "ToN", "TPDS"
+      ],
+      "A": [
+        "SIGMETRICS", "IMC", "PAM", "CoNEXT", "HotNets", "ICNP", "ICDCS", "IWQoS", "APNet",
+        "SEC", "SoCC", "ICPP", "ICS", "PACT", "CLUSTER", "HotStorage", "MSST", "ICCAD",
+        "DAC", "DATE", "FPGA", "FCCM", "EMNLP", "ACL", "NAACL", "AAAI", "IJCAI", "WWW",
+        "CIKM", "WSDM", "ICDM", "TKDE", "TMC", "TCC", "TC", "TPDS", "Computer Networks"
+      ],
+      "B": [
+        "GLOBECOM", "ICC", "WCNC", "LCN", "ISCC", "NOMS", "CNSM", "ANCS", "SIGCOMM Posters",
+        "IEEE Access", "Sensors", "Electronics", "Applied Sciences", "Future Internet",
+        "Journal of Network and Computer Applications", "Computer Communications"
+      ]
+    }
+  },
+
+  "profile": {
+    "max_keywords": 20,
+    "max_queries": 6,
+    "min_relevance_keywords": 1,
+    "seed_title_similarity": 0.8,
+    "keywords_weight_title": 3.0,
+    "keywords_weight_abstract": 1.0,
+    "stopwords": [
+      "state", "art", "existing", "prior", "work", "works", "recent", "real", "world",
+      "system", "systems", "network", "networks", "performance", "design", "implementation",
+      "evaluation", "analysis", "review", "survey", "challenges", "opportunities", "future",
+      "framework", "model", "models", "learning", "data", "training", "task", "tasks"
+    ],
+    "seed_metadata_sources": ["openalex", "arxiv"]
+  },
+
+  "llm": {
+    "provider": "deepseek",
+    "fallback_provider": "ollama",
+    "base_url": "https://api.deepseek.com/v1",
+    "model": "deepseek-chat",
+    "api_key": "",
+    "api_key_file": "",
+    "temperature": 0.2,
+    "max_tokens": 3000,
+    "timeout": 120,
+    "batch_size": 4,
+    "enabled_for": {
+      "profile": true,
+      "summary": true,
+      "relevance": false
+    },
+    "providers": {
+      "deepseek": { "style": "openai", "base_url": "https://api.deepseek.com/v1", "model": "deepseek-chat" },
+      "openai": { "style": "openai", "base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini" },
+      "moonshot": { "style": "openai", "base_url": "https://api.moonshot.cn/v1", "model": "moonshot-v1-8k" },
+      "zhipu": { "style": "openai", "base_url": "https://open.bigmodel.cn/api/paas/v4", "model": "glm-4-flash" },
+      "ollama": { "style": "ollama", "base_url": "http://127.0.0.1:11434", "model": "deepseek-r1:latest" },
+      "none": { "style": "heuristic" }
+    }
+  },
+
+  "prompts": {
+    "profile_system": "你是一位计算机领域的资深科研助理，擅长把一个模糊的研究兴趣收敛成可执行的文献检索方案。只输出 JSON，不要输出任何解释文字。",
+    "profile_user": "研究兴趣概要：\n{direction}\n\n已知种子论文（可能为空）：\n{seeds}\n\n请完成三件事：\n1. 用中文写出这个方向的精准描述（profile_summary，80-150字，点明研究对象、核心问题、常用技术路线）；\n2. 给出 10-20 个英文检索关键词（keywords，单个词或短语，按重要性排序）；\n3. 给出 {max_queries} 条英文检索式（queries），要求适合直接投给 Google Scholar / arXiv，用引号或 AND/OR 提升精度，每条检索式覆盖不同侧面（如问题、方法、场景、指标）。\n\n另外给出 negative_keywords（3-8 个希望排除的英文词，用于过滤无关论文）。\n\n严格按此 JSON 结构输出：\n{{\"profile_summary\": \"...\", \"keywords\": [\"...\"], \"queries\": [\"...\"], \"negative_keywords\": [\"...\"]}}",
+    "summary_system": "你是一位计算机领域的论文导读专家，为研究者撰写中文速读卡片。语言凝练、信息密度高，不写空话。只输出 JSON。",
+    "summary_user": "研究者当前关注的方向：\n{direction}\n关键词：{keywords}\n\n请为下面 {count} 篇论文各生成一张卡片：\n{papers}\n\n每篇需要：\n- summary：内容概要，2-3 句，说清它解决什么问题、怎么做、效果如何（不要复述标题）；\n- highlights：文章特色，2-3 条短语，指出真正的创新点或与已有工作的差异；\n- reason：推荐理由，1-2 句，明确说明它与上述方向的关系（若关系弱，直接说关系弱，不要硬夸）。\n\n严格按此 JSON 结构输出（id 必须与输入的 id 一一对应）：\n{{\"cards\": [{{\"id\": 1, \"summary\": \"...\", \"highlights\": [\"...\"], \"reason\": \"...\"}}]}}",
+    "relevance_system": "你是论文相关性评审。只输出 JSON。",
+    "relevance_user": "研究方向：{direction}\n关键词：{keywords}\n\n给下列每篇论文打 0-10 的相关性分（10=同一子方向的直接竞争工作，0=完全无关）：\n{papers}\n\n输出：{{\"scores\": [{{\"id\": 1, \"score\": 8.5}}]}}"
+  },
+
+  "zotero": {
+    "enabled": true,
+    "api_base": "https://api.zotero.org",
+    "user_id": "",
+    "api_key": "",
+    "api_key_file": "~/.dsh/zotero-key",
+    "default_collection": "",
+    "default_tags": ["paper-radar"],
+    "item_type_map": {
+      "preprint": "preprint",
+      "conference": "conferencePaper",
+      "journal": "journalArticle"
+    }
+  },
+
+  "mail": {
+    "enabled": false,
+    "transport": "smtp",
+    "smtp": {
+      "host": "",
+      "port": 465,
+      "security": "ssl",
+      "username": "",
+      "password": "",
+      "password_file": "",
+      "from_name": "Paper Radar"
+    },
+    "to": [],
+    "cc": [],
+    "subject_template": "[Paper Radar] {date} · {topic} · {count} 篇新论文",
+    "max_items_in_mail": 8
+  },
+
+  "digest": {
+    "enabled": true,
+    "time": "08:30",
+    "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+    "top_n": 5,
+    "lookback_days": 45,
+    "only_new": true,
+    "save_report": true,
+    "max_age_days_for_new": 30,
+    "min_score": 0.22,
+    "catch_up_window_minutes": 180,
+    "topics": []
+  }
+}

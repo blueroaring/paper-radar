@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Paper Radar · 文献检索与每日简报</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <h1>Paper Radar</h1>
+    <span class="sub">交换机 BM / 计算机方向 · 多源检索 → 推荐表 → 每日邮件</span>
+  </div>
+  <nav>
+    <button data-tab="topics" class="active">① 研究方向</button>
+    <button data-tab="results">② 检索推荐</button>
+    <button data-tab="digest">③ 每日简报</button>
+    <button data-tab="settings">④ 设置</button>
+  </nav>
+</header>
+
+<main>
+  <!-- ============================ 研究方向 ============================ -->
+  <section id="tab-topics" class="tab active">
+    <div class="grid two">
+      <div class="card">
+        <h2>我的研究方向</h2>
+        <p class="hint">一个方向 = 一段概要 + 任意几篇种子论文。检索式由系统自动生成，也可以手改。</p>
+        <div id="topic-list"></div>
+        <button class="act primary" id="btn-new">新建方向</button>
+      </div>
+
+      <div class="card">
+        <h2 id="topic-form-title">新建研究方向</h2>
+        <p class="hint">两种方式可以混用：写一段中文/英文的方向概要；或者直接丢几篇论文（标题、DOI、arXiv ID、链接都行）。</p>
+
+        <label for="t-name">方向名称</label>
+        <input type="text" id="t-name" placeholder="例如：交换机缓冲管理 Buffer Management">
+
+        <label for="t-direction">方向概要（自然语言，越具体越好）</label>
+        <textarea id="t-direction" placeholder="例如：我关注数据中心交换机的共享缓存管理，包括动态阈值、抢占式缓冲、HBM/片上混合缓存，关心丢包率、时延尾部分布、片上 SRAM 开销等指标。"></textarea>
+
+        <label for="t-seeds">种子论文（每行一条：标题 / DOI / arXiv ID / 链接）</label>
+        <textarea id="t-seeds" placeholder="Themis: Scheduling-Aware Buffer Management for HBM-Based Hybrid Buffers&#10;10.1145/3689031.3717495&#10;arXiv:2501.01234"></textarea>
+
+        <div class="grid three">
+          <div>
+            <label for="t-keywords">关键词（逗号分隔，可留空自动生成）</label>
+            <textarea id="t-keywords" style="min-height:60px"></textarea>
+          </div>
+          <div>
+            <label for="t-negative">排除词（逗号分隔）</label>
+            <textarea id="t-negative" style="min-height:60px"></textarea>
+          </div>
+          <div>
+            <label for="t-collection">默认 Zotero 分类</label>
+            <input type="text" id="t-collection" placeholder="例如：switch">
+            <label class="row small"><input type="checkbox" id="t-enabled" checked style="width:auto"> 参与每日简报</label>
+          </div>
+        </div>
+
+        <label for="t-queries">检索式（每行一条，留空则自动生成；会分别投给每个数据源）</label>
+        <textarea id="t-queries" style="min-height:90px"></textarea>
+
+        <div id="t-summary" class="status info"></div>
+        <div id="topic-status" class="status"></div>
+
+        <div>
+          <button class="act primary" id="btn-build">生成检索方案（AI）</button>
+          <button class="act" id="btn-save">保存</button>
+          <button class="act" id="btn-save-search">保存并去检索</button>
+          <button class="act danger" id="btn-delete">删除</button>
+        </div>
+        <pre class="log" id="build-log" style="display:none"></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================ 检索推荐 ============================ -->
+  <section id="tab-results" class="tab">
+    <div class="card">
+      <h2>检索设置</h2>
+      <p class="hint">选好方向后点「开始检索」，系统会并发打多个数据源，去重排序后再写推荐卡片。</p>
+      <div class="grid three">
+        <div>
+          <label for="r-topic">研究方向</label>
+          <select id="r-topic"></select>
+        </div>
+        <div>
+          <label for="r-limit">推荐条数</label>
+          <input type="number" id="r-limit" min="3" max="60" value="15">
+        </div>
+        <div>
+          <label>数据源（点击切换）</label>
+          <div class="chips" id="r-sources"></div>
+        </div>
+      </div>
+      <label class="row small" style="margin-top:12px">
+        <input type="checkbox" id="r-summarize" checked style="width:auto">
+        用大模型写「内容概要 / 文章特色 / 推荐理由」（关闭则用启发式模板）
+      </label>
+      <div>
+        <button class="act primary" id="btn-search">开始检索</button>
+        <button class="act" id="btn-rebuild">重建检索式后检索</button>
+        <span class="muted" id="search-hint"></span>
+      </div>
+      <pre class="log" id="search-log" style="display:none"></pre>
+      <div class="status" id="search-status"></div>
+    </div>
+
+    <div class="card">
+      <h2>推荐表</h2>
+      <p class="hint">勾选想要的论文 → 选择 Zotero 分类 → 一键入库（自动按 DOI/标题查重）。</p>
+      <div class="row" style="margin-bottom:12px">
+        <button class="act" id="btn-all">全选</button>
+        <button class="act" id="btn-none">清空</button>
+        <span class="muted" id="sel-count">已选 0 篇</span>
+        <span class="grow"></span>
+        <select id="z-collection" style="max-width:220px"><option value="">（Zotero 默认分类）</option></select>
+        <input type="text" id="z-tags" placeholder="标签，逗号分隔" style="max-width:220px">
+        <button class="act primary" id="btn-add-zotero">加入 Zotero</button>
+      </div>
+      <div class="scroll">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:34px"><input type="checkbox" id="check-all" style="width:auto"></th>
+              <th>论文</th>
+              <th style="width:150px">发表在哪里</th>
+              <th style="width:22%">内容概要</th>
+              <th style="width:20%">文章特色</th>
+              <th style="width:20%">推荐理由</th>
+              <th style="width:64px">相关度</th>
+            </tr>
+          </thead>
+          <tbody id="results-body"><tr><td colspan="7" class="muted">还没有结果，先在上面点「开始检索」。</td></tr></tbody>
+        </table>
+      </div>
+      <div class="status" id="zotero-status"></div>
+    </div>
+  </section>
+
+  <!-- ============================ 每日简报 ============================ -->
+  <section id="tab-digest" class="tab">
+    <div class="grid two">
+      <div class="card">
+        <h2>定时与收件人</h2>
+        <p class="hint">到点自动检索「最近的新论文」→ 写概要 → 发邮件，同时在本机留一份 HTML 报告。</p>
+        <div class="kv" id="sched-info"></div>
+
+        <label class="row small" style="margin-top:12px">
+          <input type="checkbox" id="d-enabled" style="width:auto"> 启用每日简报
+        </label>
+        <div class="grid three">
+          <div>
+            <label for="d-time">每天几点</label>
+            <input type="time" id="d-time" value="08:30">
+          </div>
+          <div>
+            <label for="d-topn">每次几篇</label>
+            <input type="number" id="d-topn" min="1" max="20" value="5">
+          </div>
+          <div>
+            <label for="d-lookback">只看最近多少天</label>
+            <input type="number" id="d-lookback" min="7" max="365" value="45">
+          </div>
+        </div>
+        <label>星期几</label>
+        <div class="chips" id="d-days"></div>
+        <label for="d-to">收件邮箱（逗号分隔）</label>
+        <input type="text" id="d-to" placeholder="you@example.com">
+
+        <div>
+          <button class="act primary" id="btn-save-digest">保存定时设置</button>
+          <button class="act" id="btn-digest-preview">立即试跑（只存报告不发信）</button>
+          <button class="act" id="btn-digest-send">立即试跑并发送邮件</button>
+          <button class="act" id="btn-mail-test">发一封测试邮件</button>
+        </div>
+        <pre class="log" id="digest-log" style="display:none"></pre>
+        <div class="status" id="digest-status"></div>
+      </div>
+
+      <div class="card">
+        <h2>历史</h2>
+        <h3>报告</h3>
+        <div id="report-list" class="small muted">暂无报告。</div>
+        <h3>最近运行</h3>
+        <div id="run-list" class="small muted">暂无记录。</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================ 设置 ============================ -->
+  <section id="tab-settings" class="tab">
+    <div class="grid two">
+      <div class="card">
+        <h2>大模型</h2>
+        <p class="hint">凡是 OpenAI 兼容接口都能用：改 provider / base_url / model 即切换厂商。密钥只写进 secrets.json（已 gitignore）。</p>
+        <label for="s-llm-provider">provider</label>
+        <select id="s-llm-provider"></select>
+        <label for="s-llm-fallback">fallback provider</label>
+        <select id="s-llm-fallback"></select>
+        <label for="s-llm-base">base_url</label>
+        <input type="text" id="s-llm-base">
+        <label for="s-llm-model">model</label>
+        <input type="text" id="s-llm-model">
+        <label for="s-llm-key">api_key（留空表示不修改）</label>
+        <input type="password" id="s-llm-key" placeholder="sk-...">
+        <label class="row small" style="margin-top:10px">
+          <input type="checkbox" id="s-llm-profile" style="width:auto"> 用于生成方向画像
+          <input type="checkbox" id="s-llm-summary" style="width:auto"> 用于写推荐卡片
+        </label>
+      </div>
+
+      <div class="card">
+        <h2>Zotero</h2>
+        <p class="hint">走官方 Web API。key 可从 ~/.dsh/zotero-key 读取，也可以直接贴在这里。</p>
+        <div class="kv" id="zotero-info"></div>
+        <label for="s-zotero-user">user_id（留空自动从 key 解析）</label>
+        <input type="text" id="s-zotero-user">
+        <label for="s-zotero-key">api_key（留空表示不修改）</label>
+        <input type="password" id="s-zotero-key">
+        <label for="s-zotero-tags">默认标签（逗号分隔）</label>
+        <input type="text" id="s-zotero-tags">
+        <button class="act" id="btn-load-collections">拉取分类列表</button>
+      </div>
+
+      <div class="card">
+        <h2>邮件</h2>
+        <p class="hint">QQ/163 邮箱请用「授权码」而不是登录密码；465 端口选 ssl，587 选 starttls。</p>
+        <label class="row small"><input type="checkbox" id="s-mail-enabled" style="width:auto"> 启用邮件推送</label>
+        <label for="s-mail-host">SMTP 服务器</label>
+        <input type="text" id="s-mail-host" placeholder="smtp.qq.com">
+        <div class="grid three">
+          <div><label for="s-mail-port">端口</label><input type="number" id="s-mail-port" value="465"></div>
+          <div><label for="s-mail-sec">加密</label>
+            <select id="s-mail-sec"><option value="ssl">ssl</option><option value="starttls">starttls</option><option value="plain">plain</option></select>
+          </div>
+          <div><label for="s-mail-user">发件邮箱</label><input type="text" id="s-mail-user"></div>
+        </div>
+        <label for="s-mail-pass">授权码（留空表示不修改）</label>
+        <input type="password" id="s-mail-pass">
+        <label for="s-mail-to">收件邮箱（逗号分隔）</label>
+        <input type="text" id="s-mail-to">
+      </div>
+
+      <div class="card">
+        <h2>数据源与排序</h2>
+        <p class="hint">权重越大越看重该维度（相关度 / 时效 / 引用 / 发表处）。分区表在 config.json 的 search.venue_tiers 里可整表替换。</p>
+        <label>启用的数据源（点击切换）</label>
+        <div class="chips" id="s-sources"></div>
+        <div class="grid three">
+          <div><label for="s-per-source">每个源取多少条</label><input type="number" id="s-per-source" min="5" max="100"></div>
+          <div><label for="s-w-rel">相关度权重</label><input type="number" id="s-w-rel" step="0.05" min="0"></div>
+          <div><label for="s-w-rec">时效权重</label><input type="number" id="s-w-rec" step="0.05" min="0"></div>
+          <div><label for="s-w-cit">引用权重</label><input type="number" id="s-w-cit" step="0.05" min="0"></div>
+          <div><label for="s-w-ven">发表处权重</label><input type="number" id="s-w-ven" step="0.05" min="0"></div>
+          <div><label for="s-year-lookback">默认回溯年数</label><input type="number" id="s-year-lookback" min="1" max="30"></div>
+        </div>
+        <div>
+          <button class="act primary" id="btn-save-settings">保存设置</button>
+          <button class="act" id="btn-test-sources">测试数据源连通性</button>
+        </div>
+        <pre class="log" id="settings-log" style="display:none"></pre>
+        <div class="status" id="settings-status"></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>
