@@ -1,11 +1,17 @@
-# 注册 Windows 计划任务：每天定时执行 Paper Radar 每日简报
+# Register a Windows Scheduled Task that runs the Paper Radar daily digest.
 #
-# 用法（在仓库根目录执行）：
-#   powershell -ExecutionPolicy Bypass -File scripts\install_task.ps1                 # 默认 08:30，只生成报告不发信
+# NOTE FOR MAINTAINERS: keep this file PURE ASCII (no Chinese, no BOM).
+# Windows PowerShell 5.1 decodes BOM-less .ps1 files using the ANSI/GBK code page,
+# so non-ASCII comments corrupt the whole script. See agent-experience/lessons/02.
+#
+# Usage (from the repository root):
+#   powershell -ExecutionPolicy Bypass -File scripts\install_task.ps1
 #   powershell -ExecutionPolicy Bypass -File scripts\install_task.ps1 -Time 07:45 -Send
 #   powershell -ExecutionPolicy Bypass -File scripts\install_task.ps1 -Remove
 #
-# 注意：它与程序内置的定时器（python -m paper_radar serve / daemon）二选一，同时开会重复发信。
+# The task and the built-in scheduler (python -m paper_radar serve / daemon) may
+# both be enabled: the digest only mails papers it has never mailed before, so a
+# second runner finds nothing new and stays quiet.
 
 param(
   [string]$Time = "08:30",
@@ -19,33 +25,34 @@ $repo = Split-Path -Parent $PSScriptRoot
 
 if ($Remove) {
   schtasks /Delete /TN $TaskName /F
-  Write-Host "已删除计划任务 $TaskName"
+  Write-Host "Removed scheduled task: $TaskName"
   exit 0
 }
 
 $python = (Get-Command python -ErrorAction SilentlyContinue).Source
-if (-not $python) { throw "未找到 python，请确认已安装 Python 3.10+ 并加入 PATH。" }
+if (-not $python) { throw "python not found on PATH. Install Python 3.10+ first." }
 
-$args = "-m paper_radar digest"
-if ($Send) { $args += " --send" }
+$cliArgs = "-m paper_radar digest"
+if ($Send) { $cliArgs += " --send" }
 
 $logDir = Join-Path $repo "logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $log = Join-Path $logDir "digest.log"
 
-# 用 cmd 包一层，方便把 stdout/stderr 追加到日志文件
-$command = "cmd /c cd /d `"$repo`" && set PYTHONIOENCODING=utf-8 && `"$python`" $args >> `"$log`" 2>&1"
+# Wrap in cmd so stdout/stderr can be appended to a log file.
+$inner = 'cd /d "' + $repo + '" && set PYTHONIOENCODING=utf-8 && "' + $python + '" ' + $cliArgs + ' >> "' + $log + '" 2>&1'
+$command = 'cmd /c ' + $inner
 
 schtasks /Create /TN $TaskName /TR $command /SC DAILY /ST $Time /F | Out-Null
-Write-Host "已注册计划任务：$TaskName"
-Write-Host "  执行时间 : 每天 $Time"
-Write-Host "  执行命令 : python $args"
-Write-Host "  工作目录 : $repo"
-Write-Host "  日志     : $log"
+Write-Host "Registered scheduled task: $TaskName"
+Write-Host "  time     : daily at $Time"
+Write-Host "  command  : python $cliArgs"
+Write-Host "  workdir  : $repo"
+Write-Host "  log file : $log"
 if (-not $Send) {
   Write-Host ""
-  Write-Host "[i] 当前为“只生成报告不发信”模式。要真的发邮件，请加 -Send 重新注册。" -ForegroundColor Yellow
+  Write-Host "[i] Report-only mode. Re-run with -Send to actually mail the digest."
 }
 Write-Host ""
-Write-Host "查看：schtasks /Query /TN $TaskName /V /FO LIST"
-Write-Host "立即测试：schtasks /Run /TN $TaskName"
+Write-Host "Inspect : schtasks /Query /TN $TaskName /V /FO LIST"
+Write-Host "Run now : schtasks /Run /TN $TaskName"

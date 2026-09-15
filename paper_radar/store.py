@@ -113,9 +113,14 @@ class Store:
     def __init__(self, path: str | Path):
         self.path = str(path)
         self._lock = threading.RLock()
-        self.conn = sqlite3.connect(self.path, check_same_thread=False)
+        self.conn = sqlite3.connect(self.path, check_same_thread=False, timeout=15)
         self.conn.row_factory = sqlite3.Row
         with self._lock:
+            # WAL + busy_timeout：控制台和计划任务可能同时开库，
+            # 默认的 journal 模式在这种并发下容易抛 "database is locked"。
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.execute("PRAGMA busy_timeout=15000")
+            self.conn.execute("PRAGMA synchronous=NORMAL")
             self.conn.executescript(SCHEMA)
             self.conn.commit()
 

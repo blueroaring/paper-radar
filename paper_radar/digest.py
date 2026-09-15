@@ -159,7 +159,9 @@ def run_digest(
             )
             report_path = ""
             if save_report:
-                path = ctx.cfg.reports_dir() / f"{date_str}-{slugify(topic.name)}.html"
+                # 文件名带时分：同一天手动试跑与定时运行不会互相覆盖
+                stamp = datetime.now().strftime("%Y-%m-%d-%H%M")
+                path = ctx.cfg.reports_dir() / f"{stamp}-{slugify(topic.name)}.html"
                 path.write_text(html, encoding="utf-8")
                 report_path = str(path)
                 summary["reports"].append(report_path)
