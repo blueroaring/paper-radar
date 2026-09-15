@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -61,6 +62,23 @@ class TestConfig(unittest.TestCase):
         masked = cfg.as_dict(redact=True)
         self.assertEqual(masked["llm"]["api_key"], "***")
         self.assertEqual(masked["mail"]["smtp"]["password"], "***")
+
+    def test_tolerates_utf8_bom(self):
+        # 记事本 / PowerShell 5.1 的 Set-Content -Encoding utf8 都会写 BOM，
+        # 而 json.load(encoding="utf-8") 遇到 BOM 会抛 JSONDecodeError。
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cfg.json"
+            payload = json.dumps({"app": {"port": 8123}}, ensure_ascii=False)
+            path.write_bytes(b"\xef\xbb\xbf" + payload.encode("utf-8"))
+            self.assertEqual(Config.load(path).get("app.port"), 8123)
+
+    def test_bad_json_gives_actionable_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cfg.json"
+            path.write_text('{"app": {"port": 8848,}}', encoding="utf-8")  # 末尾多余逗号
+            with self.assertRaises(SystemExit) as caught:
+                Config.load(path)
+            self.assertIn("不是合法 JSON", str(caught.exception))
 
 
 class TestModels(unittest.TestCase):

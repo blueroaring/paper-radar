@@ -51,10 +51,26 @@ def _deep_merge(base: Any, override: Any) -> Any:
 
 
 def _read_json(path: Path) -> dict:
+    """读 JSON，**容忍 UTF-8 BOM**。
+
+    为什么必须容忍：Windows 记事本和 PowerShell 5.1 的 `Set-Content -Encoding utf8`
+    都会给文件加 BOM，而 `json.load(encoding="utf-8")` 遇到 BOM 会直接抛
+    `JSONDecodeError: Expecting value: line 1 column 1`。
+    用户手改一次配置就打不开程序，这种坑不该由用户踩。
+    """
     if not path.exists():
         return {}
-    with path.open("r", encoding="utf-8") as fh:
-        return json.load(fh) or {}
+    with path.open("r", encoding="utf-8-sig") as fh:
+        text = fh.read()
+    if not text.strip():
+        return {}
+    try:
+        return json.loads(text) or {}
+    except json.JSONDecodeError as exc:
+        raise SystemExit(
+            f"配置文件 {path} 不是合法 JSON：{exc}\n"
+            f"提示：常见原因是漏逗号、用了中文引号，或末尾多了逗号。"
+        ) from exc
 
 
 def _coerce(text: str) -> Any:

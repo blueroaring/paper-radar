@@ -12,7 +12,8 @@
     "data_dir": "data",
     "db_name": "paper_radar.db",
     "language": "zh",
-    "timezone": "Asia/Shanghai"
+    "timezone": "Asia/Shanghai",
+    "access_log": false
   },
 
   "sources": {

@@ -26,6 +26,8 @@ from .scheduler import DailyScheduler
 from .sources import available_sources
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
+ACCESS_LOG_LOCK = threading.Lock()
+ACCESS_LOG_MAX_BYTES = 2 * 1024 * 1024
 
 
 class AppState:
@@ -62,8 +64,25 @@ class Handler(BaseHTTPRequestHandler):
         assert STATE is not None
         return STATE
 
-    def log_message(self, fmt: str, *args: Any) -> None:  # 静音默认日志，避免刷屏
-        return
+    def log_message(self, fmt: str, *args: Any) -> None:
+        """默认静音；app.access_log 打开时写 data/access.log（超过上限自动截半）。
+
+        本地服务出问题时，"浏览器到底有没有真的请求到"是最常需要的证据，
+        所以留一个开关，而不是永远静音。
+        """
+        try:
+            if not self.state.ctx.cfg.get("app.access_log", False):
+                return
+            line = f"{self.log_date_time_string()} {self.client_address[0]} {fmt % args}\n"
+            path = self.state.ctx.cfg.data_dir / "access.log"
+            with ACCESS_LOG_LOCK:
+                with path.open("a", encoding="utf-8") as fh:
+                    fh.write(line)
+                if path.stat().st_size > ACCESS_LOG_MAX_BYTES:
+                    keep = path.read_text(encoding="utf-8", errors="replace")
+                    path.write_text(keep[len(keep) // 2 :], encoding="utf-8")
+        except Exception:  # noqa: BLE001 - 日志失败绝不能影响请求
+            return
 
     def _send(self, status: int, body: bytes, content_type: str = "application/json; charset=utf-8") -> None:
         self.send_response(status)

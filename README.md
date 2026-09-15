@@ -54,6 +54,22 @@ python -m paper_radar selftest --mail      # LLM / Zotero / 邮件自检（可�
 python -m paper_radar daemon               # 只跑定时器，不开网页
 ```
 
+### 桌面快捷方式（一键打开网页）
+
+Windows 上可以建一个桌面图标：双击就打开控制台，**服务没在跑会自动拉起来**（无窗口后台进程），然后打开默认浏览器。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install_shortcut.ps1
+powershell -ExecutionPolicy Bypass -File scripts\install_shortcut.ps1 -Remove   # 删掉
+```
+
+- 启动逻辑在 `scripts/open-console.ps1`：从 `config.json` 读端口 → 探测 `/api/state` 确认是**本服务**（不只是"端口有人监听"）→ 必要时用 `pythonw` 无窗口启动 → 轮询到真正可用 → 打开浏览器。失败时弹中文提示框说明怎么办。
+- 图标由 `scripts/make_icon.py` 生成（`paper_radar/web/favicon.ico`，16/32/48/256 四种尺寸，纯标准库，不需要 Pillow）。
+- 停止服务：`powershell -File scripts\open-console.ps1 -Stop`（只停监听该端口的 Python 进程，不动别的程序）。
+- 想在本地排查"浏览器到底请求到没有"：把 `app.access_log` 设为 `true`，请求会写进 `data/access.log`（超过 2 MB 自动截半）。
+
+> 这几个 `.ps1` / `.bat` 一律写成**纯 ASCII**：Windows PowerShell 5.1 会按 ANSI/GBK 解码无 BOM 的脚本，中文注释会让整个脚本解析失败。
+
 ---
 
 ## 配置与密钥安全

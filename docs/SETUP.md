@@ -119,6 +119,24 @@ python -m paper_radar daemon    # 只要定时器，不开网页
 
 开机自启（Windows）：把 `run.bat` 的快捷方式丢进 `shell:startup`。
 
+#### 桌面快捷方式：双击直接打开网页
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install_shortcut.ps1
+```
+
+双击桌面上的 **Paper Radar** 会：读 `config.json` 里的端口 → 探测服务是否真的在跑 →
+没跑就用 `pythonw` 无窗口拉起来 → 轮询到可用后再打开默认浏览器。约 3～8 秒；失败会弹框告诉你下一步怎么做。
+
+| 我想… | 怎么做 |
+|---|---|
+| 换个端口 | 改 `config.json` 的 `app.port`，快捷方式自动跟随（端口不写死在脚本里） |
+| 停掉服务 | `powershell -File scripts\open-console.ps1 -Stop` |
+| 只起服务、不开浏览器 | `powershell -File scripts\open-console.ps1 -NoBrowser` |
+| 换个快捷方式名字 | `install_shortcut.ps1 -Name "My Radar"` |
+| 删掉快捷方式 | `install_shortcut.ps1 -Remove` |
+| 确认浏览器真的请求到了 | `config.json` 里 `app.access_log: true` → 看 `data/access.log` |
+
 ### 方案 B：Windows 计划任务（推荐给不常开控制台的人）
 
 ```powershell
@@ -136,8 +154,9 @@ schtasks /Delete /TN PaperRadar-Digest /F
 30 8 * * * cd /path/to/paper-radar && /usr/bin/python3 -m paper_radar digest --send >> logs/cron.log 2>&1
 ```
 
-> 无论用哪种，**请确保只有一个调度器在跑**（内置定时器 + 计划任务同时开会发两封邮件）。
-> 验证方法：看控制台 **③ 每日简报 → 最近运行**，或 `data/paper_radar.db` 的 `runs` 表。
+> **同时开两个调度器会重复发信吗？不会。** 每日简报只推"这个方向从未推送过"的论文，
+> 第二次运行会发现没有新论文而静默跳过。所以计划任务和内置定时器可以并存。
+> 想核对实际跑了什么：看控制台 **③ 每日简报 → 最近运行**，或 `data/paper_radar.db` 的 `runs` 表。
 
 ---
 
