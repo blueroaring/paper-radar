@@ -207,6 +207,17 @@
     "max_items_in_mail": 8
   },
 
+  "remember": {
+    "_comment": "高分记忆：相关度达到 min_score 的论文自动长期记下来，可在控制台的「④ 高分记忆」页签查看/导出/入库。",
+    "enabled": true,
+    "min_score": 0.6,
+    "apply_to_search": true,
+    "apply_to_digest": true,
+    "mark_in_digest": true,
+    "feedback_as_seeds": false,
+    "feedback_max_seeds": 5
+  },
+
   "digest": {
     "enabled": true,
     "time": "08:30",

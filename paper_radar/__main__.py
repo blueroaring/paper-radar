@@ -16,8 +16,9 @@ import argparse
 import json
 import sys
 import time
+from pathlib import Path
 
-from . import __version__
+from . import __version__, render
 from .config import get_config
 from .digest import run_digest
 from .engine import Context, Engine, default_topic_from_payload
@@ -92,6 +93,16 @@ def main(argv: list[str] | None = None) -> int:
     p_digest.add_argument("--top", type=int, default=None)
     p_digest.add_argument("--send", action="store_true", help="真的发邮件（默认只生成报告）")
     p_digest.add_argument("--json", action="store_true")
+
+    p_rem = sub.add_parser("remembered", help="高分记忆：查看 / 导出 / 忘记")
+    p_rem.add_argument("--threshold", type=float, default=None, help="临时覆盖相关度阈值")
+    p_rem.add_argument("--all", action="store_true", help="列出全部记忆（不过滤阈值）")
+    p_rem.add_argument("--export", choices=["markdown", "md", "bibtex", "bib", "csv", "json"], default=None)
+    p_rem.add_argument("--out", default=None, help="导出到文件（默认打印到终端）")
+    p_rem.add_argument("--forget", default=None, help="按 paper key 删除一条记忆")
+    p_rem.add_argument("--backfill", action="store_true", help="按阈值回填历史推荐")
+
+    p_dedupe = sub.add_parser("dedupe", help="合并历史遗留的重复论文行（同一篇论文的不同来源指纹）")
 
     p_sources = sub.add_parser("sources", help="列出/测试数据源")
     p_sources.add_argument("--test", action="store_true")
@@ -234,6 +245,65 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"OK，{len(found)} 条", ("例：" + found[0].title[:70]) if found else "")
             except Exception as exc:  # noqa: BLE001
                 print(f"失败：{type(exc).__name__}: {exc}")
+        return 0
+
+    if args.command == "dedupe":
+        result = ctx.store.dedupe_papers()
+        print(
+            f"合并重复论文组 {result['groups_merged']} 个，删除冗余行 {result['rows_removed']} 条；"
+            f"现有论文 {result['papers_left']} 篇、高分记忆 {result['remembered']} 条。"
+        )
+        if result.get("orphan_recommendations"):
+            print(
+                f"另有 {result['orphan_recommendations']} 条历史推荐指向已不存在的论文"
+                "（早期版本缺陷，保留它们以免重复推送；不影响使用）。"
+            )
+        return 0
+
+    if args.command == "remembered":
+        cfg = ctx.cfg
+        if args.backfill:
+            threshold = args.threshold if args.threshold is not None else float(cfg.get("remember.min_score", 0.6))
+            added = ctx.store.backfill_remembered(threshold)
+            print(f"按相关度 ≥ {threshold} 回填：新增 {len(added)} 篇，现共 {ctx.store.remembered_count()} 篇")
+            return 0
+        if args.forget:
+            ok = ctx.store.forget_remembered(args.forget)
+            print(("已忘记：" if ok else "没有这条记忆：") + args.forget)
+            return 0
+
+        threshold = args.threshold if args.threshold is not None else float(cfg.get("remember.min_score", 0.6))
+        items = ctx.store.list_remembered(limit=1000, min_score=None if args.all else threshold)
+
+        if args.export:
+            body, _ctype, ext = render.export_items(items, args.export)
+            if args.out:
+                Path(args.out).write_text(body, encoding="utf-8")
+                print(f"已导出 {len(items)} 篇 → {args.out}")
+            else:
+                print(body)
+            return 0
+
+        if not items:
+            print(f"高分记忆里还没有条目（当前阈值 {threshold}）。")
+            print("提示：跑一次 `python -m paper_radar search --topic 1`，或 `python -m paper_radar remembered --backfill` 回填历史。")
+            return 0
+        print(f"高分记忆 {len(items)} 篇（{'全部' if args.all else f'相关度 ≥ {threshold}'}，共 {ctx.store.remembered_count()} 条记录）\n")
+        for idx, item in enumerate(items, start=1):
+            meta = [
+                f"相关度 {round(item['score'] * 100)}",
+                item["venue"] or "发表处未标注",
+                str(item["year"] or "年份未知"),
+                item["topic_name"] or "未关联方向",
+                item["first_seen"][:10],
+            ]
+            print(f"{idx}. [★] {item['title']}")
+            print("   " + " · ".join(meta))
+            if item.get("summary"):
+                print("   概要: " + truncate(item["summary"], 150))
+            if item.get("note"):
+                print("   批注: " + item["note"])
+            print(f"   key: {item['key']}")
         return 0
 
     if args.command == "selftest":

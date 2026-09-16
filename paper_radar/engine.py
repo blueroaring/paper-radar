@@ -15,7 +15,7 @@ from typing import Any, Callable
 from . import rank as ranking
 from .config import Config, get_config
 from .mailer import Mailer
-from .models import Paper, Recommendation, Seed, Topic
+from .models import Paper, Recommendation, Seed, Topic, normalize_title
 from .net import Fetcher, FetchError
 from .sources import build_sources
 from .sources.arxiv import ArxivSource
@@ -390,6 +390,7 @@ class Engine:
             limit=min(limit, int(cfg.get("search.max_candidates", 150))),
         )
         progress(f"去重后 {len(ranking.dedupe(collected))} 篇，选出 {len(ranked)} 篇")
+        self._canonicalize(ranked)
         return {
             "papers": ranked,
             "candidates": candidates,
@@ -398,6 +399,23 @@ class Engine:
             "queries": queries,
             "year_from": year_from,
         }
+
+    def _canonicalize(self, papers: list[Paper]) -> None:
+        """把本轮结果对齐到本地库里已存在的记录上（按归一化标题判定同一篇论文）。
+
+        为什么必须在**写库之前**做：不同数据源给同一篇论文的标识不一样
+        （Google Scholar 没有 DOI，Crossref/OpenAlex 有）。若每轮各按自己的指纹主键写入，
+        同一篇论文会留下 `title:...` 和 `doi:...` 两行 —— 表现为推荐表/高分记忆里出现重复条目，
+        甚至把已经看过的论文当成新论文再推一次。
+        """
+        index = self.ctx.store.title_key_index()
+        for paper in papers:
+            norm = normalize_title(paper.title)
+            existing = index.get(norm)
+            if existing and existing != paper.key:
+                paper.canonical_key = existing
+            else:
+                index.setdefault(norm, paper.key)
 
     def search(
         self,
@@ -433,9 +451,18 @@ class Engine:
         if record and topic.id and recs:
             self.ctx.store.save_recommendations(topic.id, recs, status="shown", provider=provider)
 
+        remembered: list[dict] = []
+        if bool(cfg.get("remember.apply_to_search", True)):
+            remembered = self.remember_high_scores(topic, recs, origin="search", progress=progress)
+        remembered_keys = {item["key"] for item in remembered} | self.remembered_key_set()
+        threshold = self.remember_threshold()
+
         return {
             "topic": topic.to_dict(),
-            "papers": [rec.to_dict() for rec in recs],
+            "papers": [
+                {**rec.to_dict(), "remembered": rec.paper.key in remembered_keys}
+                for rec in recs
+            ],
             "candidates": collected.get("candidates", len(ranked)),
             "errors": collected.get("errors", {}),
             "sources": collected.get("sources", []),
@@ -443,7 +470,81 @@ class Engine:
             "year_from": collected.get("year_from"),
             "provider": provider,
             "reranked": rerank,
+            "remembered": remembered,
+            "remember_threshold": threshold,
         }
+
+    # ================================================================== #
+    # 高分记忆
+    # ================================================================== #
+    def remember_threshold(self) -> float:
+        return float(self.ctx.cfg.get("remember.min_score", 0.6) or 0.0)
+
+    def remembered_key_set(self) -> set[str]:
+        """只取"分数仍达标"的记忆键，供 UI 打标记；阈值调高后旧标记会自动消失。"""
+        return self.ctx.store.remembered_keys(min_score=self.remember_threshold())
+
+    def remember_high_scores(
+        self,
+        topic: Topic,
+        recs: list[Recommendation],
+        *,
+        origin: str = "search",
+        progress: Progress = _noop,
+    ) -> list[dict]:
+        """把相关度达阈值的论文记入长期记忆；可选地把它们反过来喂给检索方向。"""
+        cfg = self.ctx.cfg
+        if not cfg.get("remember.enabled", True) or not recs:
+            return []
+        threshold = self.remember_threshold()
+        added = self.ctx.store.remember(topic, recs, min_score=threshold, origin=origin)
+        if added:
+            progress(
+                f"高分记忆 +{len(added)} 篇（相关度 ≥ {threshold}）："
+                + "、".join(item["title"][:36] for item in added[:3])
+            )
+        if added and cfg.get("remember.feedback_as_seeds", False):
+            self._feed_back_as_seeds(topic, added, progress=progress)
+        return added
+
+    def _feed_back_as_seeds(self, topic: Topic, added: list[dict], *, progress: Progress = _noop) -> None:
+        """把高分论文追加为该方向的种子论文，让下一次方向画像更贴近你真正认可的工作。
+
+        默认关闭（`remember.feedback_as_seeds`）：它会悄悄改变后续检索结果，
+        属于"要让用户显式开启"的行为。种子总数上限由 `remember.feedback_max_seeds` 控制。
+        """
+        if not topic.id:
+            return
+        cap = int(self.ctx.cfg.get("remember.feedback_max_seeds", 5) or 5)
+        stored = self.ctx.store.get_topic(topic.id)
+        if not stored:
+            return
+        known = {s.doi or s.arxiv_id or s.title for s in stored.seeds}
+        room = max(0, cap - len(stored.seeds))
+        if room == 0:
+            progress(f"种子论文已达上限 {cap} 篇，跳过回填（可调 remember.feedback_max_seeds）")
+            return
+
+        added_count = 0
+        for item in added:
+            if added_count >= room:
+                break
+            paper = self.ctx.store.get_paper(item["key"])
+            if not paper:
+                continue
+            ident = paper.doi or paper.arxiv_id or paper.title
+            if ident in known:
+                continue
+            stored.seeds.append(
+                Seed(value=ident, title=paper.title, doi=paper.doi, arxiv_id=paper.arxiv_id, url=paper.url)
+            )
+            known.add(ident)
+            added_count += 1
+        if added_count:
+            self.ctx.store.save_topic(stored)
+            topic.seeds = stored.seeds
+            progress(f"已把 {added_count} 篇高分论文回填为种子（该方向种子上限 {cap} 篇）")
+
 
     # ================================================================== #
     # 一键入库

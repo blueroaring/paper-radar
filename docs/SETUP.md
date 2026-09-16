@@ -23,7 +23,7 @@ python -m paper_radar serve
 
 推荐任意一家 OpenAI 兼容服务（DeepSeek 便宜、中文好）：
 
-1. 到控制台 **④ 设置 → 大模型**，或直接编辑 `config.json`：
+1. 到控制台 **⑤ 设置 → 大模型**，或直接编辑 `config.json`：
 
 ```json
 {
@@ -57,7 +57,7 @@ python -m paper_radar selftest
 ## 3. 配置 Zotero
 
 1. 打开 <https://www.zotero.org/settings/keys/new>，勾选 **Allow library access** 和 **Allow write access**，创建 key。
-2. 填进控制台 **④ 设置 → Zotero** 的 api_key，或者：
+2. 填进控制台 **⑤ 设置 → Zotero** 的 api_key，或者：
 
 ```json
 { "zotero": { "enabled": true, "api_key": "xxxxxxxxxxxxxxxxxxxxxxxx", "default_collection": "" } }
@@ -83,7 +83,7 @@ python -m paper_radar selftest
 | Gmail | smtp.gmail.com | 587 | starttls | 需要应用专用密码 |
 | Outlook | smtp.office365.com | 587 | starttls | 账户安全 → 应用密码 |
 
-填进 **④ 设置 → 邮件**（授权码会写进 `secrets.json`），或：
+填进 **⑤ 设置 → 邮件**（授权码会写进 `secrets.json`），或：
 
 ```json
 {
@@ -150,7 +150,7 @@ powershell -ExecutionPolicy Bypass -File scripts\install_task.ps1 -Remove
 ```
 
 > **笔记本用户必读**：注册时会显式打开"错过补跑"（`StartWhenAvailable`）并解除电池限制。
-> 不设这些，到点时电脑关着/用电池，任务会**静默跳过且不补跑** —— 详见第 8 节的排障表。
+> 不设这些，到点时电脑关着/用电池，任务会**静默跳过且不补跑** —— 详见第 9 节的排障表。
 
 ### 方案 C：Linux / macOS cron
 
@@ -182,7 +182,62 @@ paper-radar/
 
 ---
 
-## 7. 常见问题
+## 7. 高分记忆怎么用
+
+**它解决的问题**：检索结果会被下一次检索冲掉，而真正值得精读的通常就是相关度最高的那几篇。
+
+### 自动记忆（默认开启）
+
+任何一次检索或每日简报跑完，相关度 ≥ `remember.min_score`（默认 **0.6**）的论文会自动记入
+`remembered` 表，跨检索、跨简报长期保留。控制台 **④ 高分记忆** 里可以查看、写批注、导出、批量入 Zotero。
+每日简报的邮件与报告里，达标论文会被打上 **★ 高分记忆** 标记。
+
+阈值在页面上直接改，不用编辑 JSON：
+
+| 阈值 | 效果 |
+|---|---|
+| 0.7~0.8 | 只记最强命中的几篇，清单很干净 |
+| **0.6（默认）** | 与方向明显相关的工作，推荐日常使用 |
+| 0.4~0.5 | 宁可多记，回头再筛 |
+
+> 阈值调高**不会删记录**，只是这些论文不再显示 ★。想真正清掉用「忘记所选」。
+
+### 手动记忆
+
+因为阈值只是"自动线"，不达标的论文也能手动记：
+
+- 在 **② 检索推荐** 勾选论文 → 点 **「★ 记入高分记忆」**；
+- 批量补记历史推荐：**④ 高分记忆 → 按当前阈值回填历史推荐**；
+- 或者把阈值临时调低 → 回填 → 再调回去（已记下的不会因调高而消失）。
+
+### 导出
+
+| 格式 | 适合 |
+|---|---|
+| Markdown | 贴进 Obsidian / Notion / 组会周报（含概要、特色、理由、批注） |
+| BibTeX | `\input` 进 LaTeX，或拖进 Zotero / EndNote |
+| CSV | Excel / pandas 二次加工 |
+| JSON | 自己写脚本处理 |
+
+```bash
+python -m paper_radar remembered                            # 列出清单
+python -m paper_radar remembered --export bibtex --out refs.bib
+python -m paper_radar remembered --export markdown --out 精读清单.md
+python -m paper_radar remembered --all --threshold 0.4       # 临时改阈值看看
+python -m paper_radar remembered --backfill                  # 把历史推荐按阈值补记
+python -m paper_radar remembered --forget <paper-key>
+```
+
+### 可选的"越用越准"
+
+打开 `remember.feedback_as_seeds` 后，新记住的高分论文会被追加为该方向的**种子论文**，
+下次「生成检索方案」会参考它们 —— 方向画像会随你的实际偏好漂移。
+上限 `feedback_max_seeds`（默认 5）防止被带偏。
+**默认关闭**：它会改变后续检索结果，属于要你显式开启的行为。
+
+---
+
+## 8. 常见问题
 
 **Q：检索很慢？**
 一次检索 = 检索式条数 × 数据源个数 个请求，外加若干次 LLM 调用。默认 6 条检索式 × 4 源 ≈ 30 秒（Google Scholar 限速 5 秒是主要开销），LLM 写 15 篇卡片再花 1~2 分钟。嫌慢就减检索式、减 `search.top_n`、关掉 `llm.enabled_for.summary`。
@@ -201,7 +256,7 @@ paper-radar/
 
 ---
 
-## 8. 排障：某天没收到邮件
+## 9. 排障：某天没收到邮件
 
 **先按这三条各查 10 秒，能定位九成情况：**
 
@@ -221,7 +276,7 @@ Get-ChildItem D:\paper-radar\data\reports | Sort-Object LastWriteTime -Descendin
 |---|---|---|
 | `LastRunTime` 停在几天前，日志/报告也没有新的 | **到点时电脑是关机/睡眠的**，而且任务没设"错过补跑" | 见下方"任务设置"；临时补一次：`scripts\install_task.ps1 -Test` |
 | `LastTaskResult` 不是 0 | 命令本身失败了（Python 路径变了、配置坏了……） | 看 `digest.log` 末尾的报错；再手动跑一次 `python -m paper_radar digest --send` 复现 |
-| 有报告、但没邮件 | SMTP 授权码过期 / 收件人为空 / `mail.enabled=false` | 控制台 ④ 设置 → 邮件 →「发一封测试邮件」 |
+| 有报告、但没邮件 | SMTP 授权码过期 / 收件人为空 / `mail.enabled=false` | 控制台 ⑤ 设置 → 邮件 →「发一封测试邮件」 |
 | 报告里 0 篇，所以没发信 | 当天确实没有**没推送过**的新论文（`only_new`） | 正常行为。想放宽：加大 `digest.lookback_days` 或降低 `digest.min_score` |
 
 ### 任务设置：笔记本上必须改默认值

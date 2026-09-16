@@ -79,6 +79,7 @@ document.querySelectorAll("nav button").forEach((btn) => {
     btn.classList.add("active");
     $("tab-" + btn.dataset.tab).classList.add("active");
     if (btn.dataset.tab === "settings") loadSettings();
+    if (btn.dataset.tab === "remembered") loadRemembered();
   });
 });
 
@@ -277,10 +278,11 @@ function renderResults() {
         (p.sources || []).slice(0, 3).join("/"),
       ].filter(Boolean).join(" · ");
       const tier = p.extra && p.extra.venue_tier && p.extra.venue_tier !== "unknown" ? ` <span class="pill">${esc(p.extra.venue_tier)}</span>` : "";
+      const star = p.remembered ? ' <span class="pill star">★ 高分记忆</span>' : "";
       const hl = (p.highlights || []).map((h) => `<li>${esc(h)}</li>`).join("");
       return `<tr>
         <td><input type="checkbox" class="pick" data-key="${esc(p.key)}" style="width:auto"></td>
-        <td class="title">${title}<div class="mini">${esc(meta)}</div></td>
+        <td class="title">${title}${star}<div class="mini">${esc(meta)}</div></td>
         <td>${esc(p.venue || "未标注")}${tier}</td>
         <td>${esc(p.summary || "—")}</td>
         <td><ul class="hl">${hl || "<li>—</li>"}</ul></td>
@@ -296,6 +298,26 @@ function renderResults() {
 function updateSelCount() {
   const n = document.querySelectorAll("#results-body .pick:checked").length;
   $("sel-count").textContent = `已选 ${n} 篇`;
+}
+
+/** 手动记入高分记忆：阈值只是"自动线"，不该限制手动挑选。 */
+async function rememberPicked() {
+  const keys = pickedKeys();
+  if (!keys.length) { showStatus("zotero-status", "先勾选要记忆的论文。", "err"); return; }
+  const data = await api("/api/remembered/add", { method: "POST", body: { keys } });
+  if (!data.ok) { showStatus("zotero-status", "失败：" + data.error, "err"); return; }
+  const added = (data.added || []).length;
+  showStatus(
+    "zotero-status",
+    added
+      ? `已记入高分记忆 ${added} 篇（其余此前已记过）。去「④ 高分记忆」查看。`
+      : "这些论文此前已经记过了。",
+    "ok"
+  );
+  // 立刻刷新表格里的 ★ 标记
+  const marked = new Set((data.added || []).map((x) => x.key));
+  if (S.results) S.results.forEach((p) => { if (marked.has(p.key)) p.remembered = true; });
+  renderResults();
 }
 
 function pickedKeys() {
@@ -541,6 +563,177 @@ async function testSources() {
 }
 
 /* ------------------------------------------------------------------ */
+/* 高分记忆                                                            */
+/* ------------------------------------------------------------------ */
+let M = { items: [], threshold: 0.6, settings: {} };
+
+async function loadRemembered() {
+  const data = await api("/api/remembered");
+  if (!data.ok) { showStatus("remember-status", "读取失败：" + data.error, "err"); return; }
+  M.items = data.items || [];
+  M.threshold = data.threshold;
+  M.settings = data.settings || {};
+  const s = M.settings;
+
+  $("m-threshold").value = data.threshold;
+  $("m-enabled").checked = !!s.enabled;
+  $("m-search").checked = !!s.apply_to_search;
+  $("m-digest").checked = !!s.apply_to_digest;
+  $("m-feedback").checked = !!s.feedback_as_seeds;
+  $("m-feedback-max").value = s.feedback_max_seeds ?? 5;
+  $("m-threshold-hint").textContent =
+    `库内共 ${data.total} 条记忆；按当前阈值列出 ${data.count} 篇。阈值调高不会删记录，只是不再纳入"达标"标记。`;
+  $("m-summary").textContent = `当前：${data.count} / ${data.total} 篇达标`;
+  renderRemembered();
+}
+
+function renderRemembered() {
+  const body = $("m-body");
+  if (!M.items.length) {
+    body.innerHTML = '<tr><td colspan="8" class="muted">还没有记忆条目。去「检索推荐」跑一次检索，或点上面的「按当前阈值回填历史推荐」。</td></tr>';
+    $("m-count").textContent = "共 0 篇";
+    return;
+  }
+  body.innerHTML = M.items
+    .map((it) => {
+      const link = it.url || (it.doi ? "https://doi.org/" + it.doi : (it.arxiv_id ? "https://arxiv.org/abs/" + it.arxiv_id : ""));
+      const title = link ? `<a href="${esc(link)}" target="_blank" rel="noreferrer">${esc(it.title)}</a>` : esc(it.title);
+      const meta = [
+        (it.authors || []).slice(0, 3).join(", "),
+        (it.sources || []).slice(0, 3).join("/"),
+        it.citations != null ? "被引 " + it.citations : null,
+      ].filter(Boolean).join(" · ");
+      const zot = it.zotero_key ? ' <span class="pill ok">已入库</span>' : "";
+      const hl = (it.highlights || []).map((h) => `<li>${esc(h)}</li>`).join("");
+      return `<tr>
+        <td><input type="checkbox" class="mpick" data-key="${esc(it.key)}" style="width:auto"></td>
+        <td class="title">${title}${zot}
+          <div class="mini">${esc(it.topic_name || "未关联方向")} · ${esc(meta || "—")}</div></td>
+        <td>${esc(it.venue || "未标注")}<div class="mini">${esc(String(it.year || "年份未知"))}</div></td>
+        <td class="score">${Math.round((it.score || 0) * 100)}</td>
+        <td class="small muted">${esc((it.first_seen || "").slice(0, 10))}</td>
+        <td class="small">${esc(it.summary || "—")}</td>
+        <td class="small"><ul class="hl">${hl || "<li>—</li>"}</ul></td>
+        <td><input type="text" class="mnote" data-key="${esc(it.key)}" value="${esc(it.note || "")}" placeholder="写点批注…" style="font-size:12px"></td>
+      </tr>`;
+    })
+    .join("");
+  body.querySelectorAll(".mpick").forEach((cb) => cb.addEventListener("change", updateMCount));
+  body.querySelectorAll(".mnote").forEach((el) =>
+    el.addEventListener("change", async () => {
+      const data = await api("/api/remembered/update", {
+        method: "POST",
+        body: { key: el.dataset.key, note: el.value },
+      });
+      if (!data.ok) { showStatus("m-status", "批注保存失败：" + data.error, "err"); return; }
+      const item = M.items.find((x) => x.key === el.dataset.key);
+      if (item) item.note = el.value;
+      showStatus("m-status", "批注已保存。", "ok");
+    })
+  );
+  updateMCount();
+}
+
+function updateMCount() {
+  const n = document.querySelectorAll("#m-body .mpick:checked").length;
+  $("m-count").textContent = `共 ${M.items.length} 篇，已选 ${n} 篇`;
+}
+
+function mPickedKeys() {
+  return Array.from(document.querySelectorAll("#m-body .mpick:checked")).map((cb) => cb.dataset.key);
+}
+
+async function saveRememberSettings() {
+  const patch = {
+    remember: {
+      enabled: $("m-enabled").checked,
+      min_score: Number($("m-threshold").value),
+      apply_to_search: $("m-search").checked,
+      apply_to_digest: $("m-digest").checked,
+      feedback_as_seeds: $("m-feedback").checked,
+      feedback_max_seeds: Number($("m-feedback-max").value) || 5,
+    },
+  };
+  const data = await api("/api/settings", { method: "POST", body: { patch } });
+  if (!data.ok) { showStatus("remember-status", "保存失败：" + data.error, "err"); return; }
+  showStatus(
+    "remember-status",
+    `已保存：相关度 ≥ ${patch.remember.min_score} 的论文会被记住` +
+      (patch.remember.feedback_as_seeds ? "，并回填为方向种子。" : "。"),
+    "ok"
+  );
+  await loadRemembered();
+  refresh();
+}
+
+async function backfillRemembered() {
+  $("remember-log").style.display = "block";
+  showStatus("remember-status", "正在按阈值回填历史推荐…", "info");
+  const data = await api("/api/remembered/backfill", {
+    method: "POST",
+    body: { min_score: Number($("m-threshold").value) },
+  });
+  if (!data.ok) { showStatus("remember-status", "失败：" + data.error, "err"); return; }
+  pollJob(data.job.id, "remember-log", (job) => {
+    if (job.status === "error") { showStatus("remember-status", "回填失败：" + job.error, "err"); return; }
+    const added = (job.result || {}).added || [];
+    showStatus("remember-status", `回填完成，新增 ${added.length} 篇，现共 ${(job.result || {}).total} 篇。`, "ok");
+    loadRemembered();
+  });
+}
+
+async function forgetRemembered() {
+  const keys = mPickedKeys();
+  if (!keys.length) { showStatus("m-status", "先勾选要忘记的条目。", "err"); return; }
+  if (!confirm(`确定忘记这 ${keys.length} 篇？\n（只删除"高分记忆"里的条目，Zotero 里的文献和推荐历史都不受影响）`)) return;
+  const data = await api("/api/remembered/forget", { method: "POST", body: { keys } });
+  if (!data.ok) { showStatus("m-status", "失败：" + data.error, "err"); return; }
+  showStatus("m-status", `已忘记 ${data.forgotten} 篇，现共 ${data.total} 篇。`, "ok");
+  loadRemembered();
+}
+
+async function exportRemembered(download) {
+  const fmt = $("m-export-format").value;
+  const resp = await fetch(`/api/remembered/export?format=${encodeURIComponent(fmt)}&only_high=0${download ? "&download=1" : ""}`);
+  const text = await resp.text();
+  if (!resp.ok) { showStatus("m-status", "导出失败：" + text.slice(0, 200), "err"); return; }
+  if (download) {
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `paper-radar-remembered.${fmt === "bibtex" ? "bib" : fmt === "markdown" ? "md" : fmt}`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showStatus("m-status", `已下载 ${fmt} 文件（${M.items.length} 篇）。`, "ok");
+  } else {
+    try {
+      await navigator.clipboard.writeText(text);
+      showStatus("m-status", `已复制 ${fmt} 内容到剪贴板（${M.items.length} 篇）。`, "ok");
+    } catch (e) {
+      showStatus("m-status", "浏览器拒绝了剪贴板写入，请用「下载」。", "err");
+    }
+  }
+}
+
+async function addRememberedToZotero() {
+  const keys = mPickedKeys();
+  if (!keys.length) { showStatus("m-status", "先勾选要入库的条目。", "err"); return; }
+  showStatus("m-status", `正在写入 Zotero（${keys.length} 篇）…`, "info");
+  const data = await api("/api/zotero/add", {
+    method: "POST",
+    body: { keys, collection: $("z-collection").value, tags: $("z-tags").value.split(",").map((s) => s.trim()).filter(Boolean) },
+  });
+  if (!data.ok) { showStatus("m-status", "失败：" + data.error, "err"); return; }
+  const r = data.result || {};
+  const parts = [`成功 ${r.added || 0} 篇`];
+  if (r.duplicates) parts.push(`已存在跳过 ${r.duplicates} 篇`);
+  if (r.failed) parts.push(`失败 ${r.failed} 篇`);
+  showStatus("m-status", parts.join(" · "), r.error ? "info" : "ok");
+  loadRemembered();
+}
+
+/* ------------------------------------------------------------------ */
 /* 事件绑定                                                            */
 /* ------------------------------------------------------------------ */
 $("btn-new").addEventListener("click", newTopic);
@@ -560,6 +753,19 @@ $("check-all").addEventListener("change", (e) => {
   updateSelCount();
 });
 $("btn-add-zotero").addEventListener("click", addToZotero);
+$("btn-remember").addEventListener("click", rememberPicked);
+$("btn-save-remember").addEventListener("click", saveRememberSettings);
+$("btn-backfill").addEventListener("click", backfillRemembered);
+$("btn-m-all").addEventListener("click", () => { document.querySelectorAll("#m-body .mpick").forEach((cb) => (cb.checked = true)); updateMCount(); });
+$("btn-m-none").addEventListener("click", () => { document.querySelectorAll("#m-body .mpick").forEach((cb) => (cb.checked = false)); updateMCount(); });
+$("m-check-all").addEventListener("change", (e) => {
+  document.querySelectorAll("#m-body .mpick").forEach((cb) => (cb.checked = e.target.checked));
+  updateMCount();
+});
+$("btn-m-export").addEventListener("click", () => exportRemembered(true));
+$("btn-m-copy").addEventListener("click", () => exportRemembered(false));
+$("btn-m-zotero").addEventListener("click", addRememberedToZotero);
+$("btn-m-forget").addEventListener("click", forgetRemembered);
 $("r-topic").addEventListener("change", (e) => selectTopic(Number(e.target.value)));
 $("btn-save-digest").addEventListener("click", saveDigestSettings);
 $("btn-digest-preview").addEventListener("click", () => runDigestNow(false));

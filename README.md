@@ -13,12 +13,14 @@ English: A self-hosted literature radar for CS researchers — describe your res
 | ① 可视化改变检索方向 | `http://127.0.0.1:8848` 控制台：写一段方向概要，**或者**丢几篇论文（标题 / DOI / arXiv ID / 链接），点一下自动生成关键词与多条检索式，并且可以手改 |
 | ② 多源检索 + 推荐表 | Google Scholar、arXiv、OpenAlex、Crossref（+ 可选 dblp、Semantic Scholar）并发检索 → 去重 → 加权排序 → 表格里给出**内容概要 / 文章特色 / 发表在哪里 / 推荐理由 / 相关度**，勾选后一键写入 Zotero（自动查重、归入指定分类、打标签） |
 | ③ 每日定时邮件 | 在 UI 里设定"每天几点 + 星期几 + 每次几篇"，到点自动检索最近的新论文、写概要、发邮件，同时在本机留一份 HTML 报告 |
+| ④ 高分记忆 | 相关度达到阈值的论文**自动长期记住**（跨检索、跨简报保留），可查看、写批注、导出 Markdown / BibTeX / CSV / JSON、批量入 Zotero；邮件里给达标论文打 ★ |
 
 设计上刻意做到 **可扩展、少硬编码**：
 
 - **数据源是插件**：`paper_radar/sources/` 下丢一个 `.py` 就自动注册，配置文件决定启不启用；
 - **LLM 厂商是配置**：DeepSeek / OpenAI / Moonshot / 智谱 / 本地 Ollama 都在 `config.json` 里，凡是 OpenAI 兼容接口加一行配置就能用；
 - **邮件通道是插件**：默认 SMTP，另有 `file` 通道把邮件落成 `.eml` 方便离线预览；
+- **导出格式是注册表**：Markdown / BibTeX / CSV / JSON，加一种只需在 `render.EXPORTERS` 注册一项；
 - **提示词、分区表、权重、停用词全在配置里**：想换 CCF 分区表、想改推荐口味，改 JSON 即可，不用碰代码；
 - 核心运行时**零第三方依赖**（只用 Python 标准库），换台机器 clone 下来就能跑。
 
@@ -37,7 +39,7 @@ python -m paper_radar serve             # 打开 http://127.0.0.1:8848
 
 首次使用建议顺序：
 
-1. 打开控制台 → **④ 设置**：填 LLM（provider / base_url / model / api_key）、Zotero（api_key）、邮件（SMTP + 授权码）；
+1. 打开控制台 → **⑤ 设置**：填 LLM（provider / base_url / model / api_key）、Zotero（api_key）、邮件（SMTP + 授权码）；
 2. **① 研究方向**：写方向概要 + 贴几篇种子论文 → 点「生成检索方案（AI）」→ 检查/修改关键词与检索式；
 3. **② 检索推荐**：点「开始检索」→ 看推荐表 → 勾选 → 选 Zotero 分类 → 「加入 Zotero」；
 4. **③ 每日简报**：设定时间 → 点「立即试跑（只存报告不发信）」确认效果 → 再点「立即试跑并发送邮件」。
@@ -128,6 +130,47 @@ config.example.json   （仓库内置默认值，唯一业务参数来源）
 
 ---
 
+## 高分记忆
+
+![高分记忆页面](docs/screenshot-remember.png)
+
+推荐表里分数高的论文往往就是你要精读的那几篇，但检索结果会被下一次检索冲掉。**高分记忆**把"值得回看"这件事变成持久化的：
+
+```json
+"remember": {
+  "enabled": true,
+  "min_score": 0.6,            // 相关度门槛（0~1），控制台里可随时改
+  "apply_to_search": true,     // 手动检索时自动记忆
+  "apply_to_digest": true,     // 每日简报时自动记忆
+  "mark_in_digest": true,      // 邮件/报告里给达标论文打 ★
+  "feedback_as_seeds": false,  // 把高分论文反过来喂给检索方向（默认关）
+  "feedback_max_seeds": 5
+}
+```
+
+- **阈值只是"自动线"，不是限制**：你可以在「检索推荐」里勾选任意论文手动记进来（哪怕分数很低）。
+- **阈值调高不会删记录**，只是不再纳入"达标"高亮 —— 想真正删除用「忘记所选」。
+- **导出**：控制台「④ 高分记忆」右上角选格式 → 下载 / 复制；命令行也能出文件：
+
+  ```bash
+  python -m paper_radar remembered                          # 列出记忆清单
+  python -m paper_radar remembered --export bibtex --out refs.bib
+  python -m paper_radar remembered --export markdown --out 精读清单.md
+  python -m paper_radar remembered --all --threshold 0.4     # 临时改阈值看看
+  python -m paper_radar remembered --backfill                # 按阈值回填历史推荐
+  python -m paper_radar remembered --forget <paper-key>
+  ```
+
+- **可选的反哺检索**：把 `feedback_as_seeds` 打开后，新记下的高分论文会追加为该方向的**种子论文**，
+  下一次「生成检索方案」就会参考它们 —— 相当于让方向画像随你的实际偏好漂移。
+  **默认关闭**，因为它会改变后续检索结果，属于要显式开启的行为。
+
+> 设计说明：`recommendations` 表记录"这个方向看过哪些论文"（用于去重、防止重复推送），
+> `remembered` 表记录"你真正想回看的论文"（用于回看、导出、入库），两者职责分开。
+> 记忆是按论文指纹去重的，同一篇论文无论被多少个数据源、多少轮检索命中，只会有一条。
+
+---
+
 ## 每日简报怎么跑起来
 
 三种方式任选：
@@ -141,7 +184,7 @@ config.example.json   （仓库内置默认值，唯一业务参数来源）
 计划任务那一侧要留意：`schtasks /Create` 的默认设置是 **错过不补跑 + 用电池不启动**，
 到点时电脑关着就会被**静默跳过**（不报错、不提醒）。`scripts/install_task.ps1` 用 ScheduledTasks 模块
 显式改掉了这三项，并提供 `-Test`（立即试跑）与 `-Wake`（到点唤醒电脑）。
-完整排查表和原理见 [`docs/SETUP.md` 第 8 节](docs/SETUP.md)。
+完整排查表和原理见 [`docs/SETUP.md` 第 9 节](docs/SETUP.md)。
 
 ---
 

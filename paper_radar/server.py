@@ -13,15 +13,17 @@ import mimetypes
 import posixpath
 import threading
 import urllib.parse
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from . import render
 from .config import get_config, save_secrets
 from .digest import run_digest
 from .engine import Context, Engine, default_topic_from_payload
 from .jobs import JobManager
-from .models import Topic
+from .models import Recommendation, Topic
 from .scheduler import DailyScheduler
 from .sources import available_sources
 
@@ -215,6 +217,16 @@ class Handler(BaseHTTPRequestHandler):
                         "year_lookback": cfg.get("search.year_lookback"),
                     },
                     "digest": cfg.get("digest", {}),
+                    "remember": {
+                        "threshold": float(cfg.get("remember.min_score", 0.6) or 0.0),
+                        "enabled": bool(cfg.get("remember.enabled", True)),
+                        "apply_to_search": bool(cfg.get("remember.apply_to_search", True)),
+                        "apply_to_digest": bool(cfg.get("remember.apply_to_digest", True)),
+                        "mark_in_digest": bool(cfg.get("remember.mark_in_digest", True)),
+                        "feedback_as_seeds": bool(cfg.get("remember.feedback_as_seeds", False)),
+                        "feedback_max_seeds": int(cfg.get("remember.feedback_max_seeds", 5) or 5),
+                        "count": ctx.store.remembered_count(),
+                    },
                     "config_masked": cfg.as_dict(redact=True),
                 }
             )
@@ -232,6 +244,54 @@ class Handler(BaseHTTPRequestHandler):
                     "recommendations": ctx.store.list_recommendations(topic_id, limit=50),
                 }
             )
+        if path == "/api/remembered":
+            threshold = float(ctx.cfg.get("remember.min_score", 0.6) or 0.0)
+            only_high = query.get("only_high", ["0"])[0] in ("1", "true")
+            items = ctx.store.list_remembered(
+                limit=int((query.get("limit", ["300"])[0]) or 300),
+                min_score=threshold if only_high else None,
+            )
+            return self._json(
+                {
+                    "ok": True,
+                    "items": items,
+                    "count": len(items),
+                    "threshold": threshold,
+                    "total": ctx.store.remembered_count(),
+                    "settings": {
+                        "enabled": bool(ctx.cfg.get("remember.enabled", True)),
+                        "apply_to_search": bool(ctx.cfg.get("remember.apply_to_search", True)),
+                        "apply_to_digest": bool(ctx.cfg.get("remember.apply_to_digest", True)),
+                        "mark_in_digest": bool(ctx.cfg.get("remember.mark_in_digest", True)),
+                        "feedback_as_seeds": bool(ctx.cfg.get("remember.feedback_as_seeds", False)),
+                        "feedback_max_seeds": int(ctx.cfg.get("remember.feedback_max_seeds", 5) or 5),
+                    },
+                }
+            )
+        if path == "/api/remembered/export":
+            fmt = (query.get("format", ["markdown"])[0] or "markdown").lower()
+            only_high = query.get("only_high", ["1"])[0] in ("1", "true")
+            threshold = float(ctx.cfg.get("remember.min_score", 0.6) or 0.0)
+            items = ctx.store.list_remembered(limit=1000, min_score=threshold if only_high else None)
+            try:
+                body, ctype, ext = render.export_items(items, fmt)
+            except ValueError as exc:
+                return self._error(str(exc))
+            stamp = datetime.now().strftime("%Y%m%d-%H%M")
+            payload = body.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(payload)))
+            if query.get("download"):
+                self.send_header(
+                    "Content-Disposition",
+                    f'attachment; filename="paper-radar-remembered-{stamp}.{ext}"',
+                )
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(payload)
+            return
         if path == "/api/jobs":
             return self._json({"ok": True, "jobs": self.state.jobs.list(20)})
         if path.startswith("/api/jobs/"):
@@ -385,6 +445,50 @@ class Handler(BaseHTTPRequestHandler):
                 save_secrets(secrets)
             ctx.reload()
             return self._json({"ok": True, "config": ctx.cfg.as_dict(redact=True)})
+
+        if path == "/api/remembered/forget":
+            keys = [str(k) for k in (body.get("keys") or [])]
+            removed = [k for k in keys if ctx.store.forget_remembered(k)]
+            return self._json({"ok": True, "forgotten": len(removed), "total": ctx.store.remembered_count()})
+
+        if path == "/api/remembered/update":
+            key = str(body.get("key") or "")
+            if not key:
+                return self._error("缺少 key")
+            ok = ctx.store.update_remembered(
+                key,
+                note=body.get("note"),
+                tags=[str(t) for t in body["tags"]] if isinstance(body.get("tags"), list) else None,
+            )
+            return self._json({"ok": ok, "item": ctx.store.get_remembered(key)})
+
+        if path == "/api/remembered/add":
+            # 手动把任意论文（含没到阈值的）记住 —— 阈值只是自动线，不该限制手动
+            keys = [str(k) for k in (body.get("keys") or [])]
+            threshold = float(body.get("min_score", 0.0) or 0.0)
+            added = []
+            for key in keys:
+                paper = ctx.store.get_paper(key)
+                if not paper:
+                    continue
+                added.extend(
+                    engine.ctx.store.remember(
+                        None, [Recommendation(paper=paper)], min_score=threshold, origin="manual"
+                    )
+                )
+            return self._json({"ok": True, "added": added})
+
+        if path == "/api/remembered/backfill":
+            threshold = float(body.get("min_score") or ctx.cfg.get("remember.min_score", 0.6) or 0.0)
+
+            def _run_backfill(job):
+                job.log(f"按相关度 ≥ {threshold} 回填历史推荐…")
+                added = ctx.store.backfill_remembered(threshold)
+                job.log(f"新增 {len(added)} 篇")
+                return {"added": added, "total": ctx.store.remembered_count()}
+
+            job = self.state.jobs.submit("remember_backfill", _run_backfill, {"min_score": threshold})
+            return self._json({"ok": True, "job": job.to_dict()})
 
         if path == "/api/sources/test":
             from .net import Fetcher

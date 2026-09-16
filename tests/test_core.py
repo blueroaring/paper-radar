@@ -19,7 +19,15 @@ from paper_radar.config import Config, save_secrets
 from paper_radar.digest import filter_recent
 from paper_radar.engine import title_similarity
 from paper_radar.mailer import Mailer
-from paper_radar.models import Paper, Recommendation, Seed, Topic, fingerprint, normalize_title
+from paper_radar.models import (
+    Paper,
+    Recommendation,
+    Seed,
+    Topic,
+    fingerprint,
+    normalize_title,
+    venue_quality,
+)
 from paper_radar.sources.arxiv import _matches_locally, parse_arxiv_feed, parse_arxiv_rss
 from paper_radar.sources.crossref import item_to_paper
 from paper_radar.sources.dblp import hit_to_paper
@@ -110,6 +118,23 @@ class TestModels(unittest.TestCase):
         self.assertEqual(left.citations, 10)
         self.assertEqual(left.sources, ["arxiv", "dblp"])
         self.assertEqual(left.authors, ["A B"])
+
+    def test_venue_quality_and_merge_prefers_formal_venue(self):
+        # 「发表在哪里」是推荐表的核心列，不能被 arXiv 占位名压过去
+        self.assertEqual(venue_quality(""), 0)
+        self.assertEqual(venue_quality("arXiv preprint (cs.NI)"), 1)
+        self.assertEqual(venue_quality("arXiv (Cornell University)"), 1)
+        self.assertEqual(venue_quality("Proceedings of the Twentieth European Conference on Computer Systems"), 2)
+
+        pre = Paper(title="Occamy", venue="arXiv (Cornell University)", source="openalex", sources=["openalex"])
+        conf = Paper(title="Occamy", venue="EuroSys 2025", doi="10.1/o", source="crossref", sources=["crossref"])
+        pre.merge(conf)
+        self.assertEqual(pre.venue, "EuroSys 2025", "正式会议名应替换预印本占位名")
+
+        # 反向：正式 venue 在前，不该被预印本名覆盖
+        conf2 = Paper(title="Occamy", venue="EuroSys 2025", source="crossref", sources=["crossref"])
+        conf2.merge(Paper(title="Occamy", venue="arXiv preprint", source="arxiv", sources=["arxiv"]))
+        self.assertEqual(conf2.venue, "EuroSys 2025")
 
 
 class TestTextUtil(unittest.TestCase):
@@ -541,10 +566,200 @@ class TestTitleSimilarity(unittest.TestCase):
         self.assertLess(title_similarity("Occamy: A Preemptive Buffer Management", "Ocean: a buffer management"), 0.85)
 
 
+class TestHighScoreMemory(unittest.TestCase):
+    """高分记忆：阈值自动记忆、幂等、跨运行身份统一、导出。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Store(Path(self.tmp.name) / "m.db")
+        self.topic = Topic(name="交换机BM")
+        self.topic.id = self.store.save_topic(self.topic)
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def _rec(self, paper, score, **kwargs):
+        return Recommendation(paper=paper, score=score, score_parts={"relevance": score}, **kwargs)
+
+    def test_remembers_only_above_threshold(self):
+        high = Paper(title="High", doi="10.1/high", source="t", sources=["t"])
+        low = Paper(title="Low", doi="10.1/low", source="t", sources=["t"])
+        self.store.upsert_papers([high, low])
+        added = self.store.remember(
+            self.topic,
+            [self._rec(high, 0.81, summary="S"), self._rec(low, 0.42, summary="S2")],
+            min_score=0.6,
+        )
+        self.assertEqual([a["title"] for a in added], ["High"])
+        self.assertEqual(self.store.remembered_count(), 1)
+
+    def test_remember_is_idempotent_and_keeps_best(self):
+        paper = Paper(title="P", doi="10.1/p", source="t", sources=["t"])
+        self.store.upsert_papers([paper])
+        self.store.remember(self.topic, [self._rec(paper, 0.7, summary="第一次", reason="R")], min_score=0.6)
+        self.assertEqual(self.store.remember(self.topic, [self._rec(paper, 0.7)], min_score=0.6), [])
+        self.assertEqual(self.store.remembered_count(), 1)
+        # 分数取历史最高；已有的概要/理由不被空值覆盖
+        self.store.remember(self.topic, [self._rec(paper, 0.93, summary="", reason="")], min_score=0.6)
+        row = self.store.list_remembered()[0]
+        self.assertEqual(row["score"], 0.93)
+        self.assertEqual(row["summary"], "第一次")
+        self.assertEqual(row["reason"], "R")
+
+    def test_note_and_forget(self):
+        paper = Paper(title="P", doi="10.1/p", source="t", sources=["t"])
+        self.store.upsert_papers([paper])
+        self.store.remember(self.topic, [self._rec(paper, 0.9)], min_score=0.6)
+        self.assertTrue(self.store.update_remembered(paper.key, note="必读", tags=["核心"]))
+        row = self.store.list_remembered()[0]
+        self.assertEqual(row["note"], "必读")
+        self.assertEqual(row["tags"], ["核心"])
+        self.assertTrue(self.store.forget_remembered(paper.key))
+        self.assertEqual(self.store.remembered_count(), 0)
+        self.assertFalse(self.store.forget_remembered("不存在"))
+
+    def test_backfill_from_history(self):
+        paper = Paper(title="历史高分", doi="10.1/h", source="t", sources=["t"])
+        self.store.upsert_papers([paper])
+        self.store.save_recommendations(
+            self.topic.id, [self._rec(paper, 0.77, summary="S", reason="R")], status="shown"
+        )
+        self.assertEqual(self.store.remembered_count(), 0)
+        self.assertEqual(len(self.store.backfill_remembered(0.6)), 1)
+        self.assertEqual(self.store.remembered_count(), 1)
+
+    def test_canonical_key_prevents_cross_run_duplicates(self):
+        """真实缺陷回归：Scholar 无 DOI 先入库、Crossref 带 DOI 后入库，不能变成两行。"""
+        scholar = Paper(title="Preemptive Buffer Mgmt", source="google_scholar", sources=["google_scholar"])
+        self.store.upsert_papers([scholar])
+        index = self.store.title_key_index()
+        self.assertEqual(index[normalize_title(scholar.title)], scholar.key)
+
+        crossref = Paper(title="Preemptive Buffer Mgmt!", doi="10.1/abc", source="crossref", sources=["crossref"])
+        crossref.canonical_key = index[normalize_title(crossref.title)]
+        self.store.upsert_papers([crossref])
+        self.assertEqual(self.store.count_papers(), 1, "同一篇论文不该有两行")
+
+    def test_dedupe_papers_repairs_history(self):
+        """老数据里已经存在的重复行，用 dedupe_papers 合并回一条且不留孤儿。"""
+        a = Paper(title="Same Paper", source="google_scholar", sources=["google_scholar"])
+        b = Paper(
+            title="Same paper!",
+            doi="10.1/same",
+            source="crossref",
+            sources=["crossref"],
+            abstract="长摘要" * 20,
+        )
+        self.store.upsert_papers([a, b])
+        self.assertEqual(self.store.count_papers(), 2)
+        self.store.remember(self.topic, [self._rec(a, 0.9, summary="S")], min_score=0.6)
+        self.store.save_recommendations(self.topic.id, [self._rec(a, 0.9)], status="shown")
+
+        result = self.store.dedupe_papers()
+        self.assertEqual(result["groups_merged"], 1)
+        self.assertEqual(result["rows_removed"], 1)
+        self.assertEqual(self.store.count_papers(), 1)
+        self.assertEqual(len(self.store.list_remembered()), 1)
+        for table in ("remembered", "recommendations"):
+            orphans = self.store.conn.execute(
+                f"SELECT COUNT(*) AS c FROM {table} t LEFT JOIN papers p ON p.key=t.paper_key WHERE p.key IS NULL"
+            ).fetchone()["c"]
+            self.assertEqual(orphans, 0, f"{table} 不应留下孤儿")
+        self.assertEqual(self.store.dedupe_papers()["rows_removed"], 0)
+
+    def test_upsert_never_downgrades_venue(self):
+        """后续某次只有 arXiv 返回该论文时，不能把已存的正式会议名覆盖掉。"""
+        paper = Paper(title="Occamy", doi="10.1/o", venue="EuroSys 2025", source="crossref", sources=["crossref"])
+        self.store.upsert_papers([paper])
+        again = Paper(
+            title="Occamy",
+            doi="10.1/o",
+            venue="arXiv preprint (cs.NI)",
+            arxiv_id="2501.1",
+            source="arxiv",
+            sources=["arxiv"],
+        )
+        self.store.upsert_papers([again])
+        row = self.store.conn.execute("SELECT venue, arxiv_id FROM papers WHERE key = ?", (paper.key,)).fetchone()
+        self.assertEqual(row["venue"], "EuroSys 2025", "正式会议名只升不降")
+        self.assertEqual(row["arxiv_id"], "2501.1", "其他字段照常补齐")
+
+    def test_dedupe_papers_keeps_the_formal_venue(self):
+        """合并重复行时，「发表在哪里」要保留正式会议名，而不是 arXiv 占位名。"""
+        pre = Paper(
+            title="Occamy",
+            venue="arXiv (Cornell University)",
+            source="openalex",
+            sources=["openalex"],
+            abstract="短",
+        )
+        conf = Paper(
+            title="Occamy",
+            venue="EuroSys 2025",
+            doi="10.1/occamy",
+            source="crossref",
+            sources=["crossref"],
+            citations=7,
+        )
+        self.store.upsert_papers([pre, conf])
+        self.store.dedupe_papers()
+        self.assertEqual(self.store.count_papers(), 1)
+        survivors = self.store.conn.execute("SELECT key, venue, citations FROM papers").fetchall()
+        self.assertEqual(survivors[0]["venue"], "EuroSys 2025")
+        self.assertEqual(survivors[0]["citations"], 7)
+
+    def test_exporters_cover_all_fields(self):
+        item = {
+            "key": "k1",
+            "title": "Preemptive Buffer Management",
+            "authors": ["Hao Li", "Danfeng Shan"],
+            "year": 2025,
+            "venue": "EuroSys",
+            "doi": "10.1145/1.2",
+            "url": "https://x.org",
+            "score": 0.87,
+            "topic_name": "交换机BM",
+            "first_seen": "2026-09-16T15:00:00",
+            "summary": "概要",
+            "highlights": ["特色一"],
+            "reason": "理由",
+            "note": "必读",
+            "item_type": "conferencePaper",
+        }
+        md = render.export_items([item], "markdown")[0]
+        self.assertIn("内容概要", md)
+        self.assertIn("交换机BM", md)
+        self.assertIn("必读", md)
+
+        bib = render.export_items([item], "bibtex")[0]
+        self.assertIn("@inproceedings{Li2025", bib)
+        self.assertIn("author = {Hao Li and Danfeng Shan}", bib)
+        self.assertIn("booktitle = {EuroSys}", bib)
+        self.assertIn("必读", bib)
+        self.assertEqual(bib.count("note ="), 1, "note 字段不能重复出现")
+
+        csv_text = render.export_items([item], "csv")[0]
+        self.assertIn("Hao Li; Danfeng Shan", csv_text)
+        self.assertIn("交换机BM", csv_text)
+
+        payload = json.loads(render.export_items([item], "json")[0])
+        self.assertEqual(payload[0]["title"], item["title"])
+
+        with self.assertRaises(ValueError):
+            render.export_items([item], "xlsx")
+
+    def test_digest_marks_remembered_items(self):
+        item = {"title": "T", "year": 2026, "venue": "V", "score": 0.9, "remembered": True}
+        html = render.render_digest(topic_name="X", direction="d", items=[item], generated_at="now")
+        self.assertIn("★ 高分记忆", html)
+        self.assertIn("★ 高分记忆 1 篇", html)
+        self.assertIn("★高分记忆", render.render_text([item], topic_name="X"))
+
+
 class _FakeCtx:
     def __init__(self, cfg):
         self.cfg = cfg
-
 
 class TestScheduler(unittest.TestCase):
     """覆盖真实踩过的坑：晚上启动控制台不该立刻补发早报。"""

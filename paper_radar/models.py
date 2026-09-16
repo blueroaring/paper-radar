@@ -15,6 +15,30 @@ from typing import Any
 _WS_RE = re.compile(r"\s+")
 _NON_WORD_RE = re.compile(r"[^0-9a-z\u4e00-\u9fff]+")
 
+# "预印本仓库"类的发表处：能拿到正式会议/期刊名时应该被替换掉。
+# 否则推荐表的「发表在哪里」会显示 "arXiv (Cornell University)" 而不是 "EuroSys"，
+# 而这恰恰是用户最关心的三列之一。
+_PREPRINT_VENUE_HINTS = (
+    "arxiv",
+    "preprint",
+    "biorxiv",
+    "medrxiv",
+    "ssrn",
+    "research square",
+    "cornell university",
+    "posted content",
+)
+
+
+def venue_quality(venue: str) -> int:
+    """发表处"正式程度"：0 空 / 1 预印本占位 / 2 正式会议或期刊。"""
+    text = (venue or "").strip().lower()
+    if not text:
+        return 0
+    if any(hint in text for hint in _PREPRINT_VENUE_HINTS):
+        return 1
+    return 2
+
 
 def normalize_title(title: str) -> str:
     """归一化标题，用于跨库去重（大小写、标点、空白差异都不该算两篇）。"""
@@ -78,16 +102,28 @@ class Paper:
     reason: str = ""                    # 推荐理由
     matched_keywords: list[str] = field(default_factory=list)
 
+    # 规范身份：本地库已存在同一篇论文（按归一化标题判定）时由 engine 填上那条记录的主键，
+    # 保证跨运行的 key 稳定 —— 否则"某次只有 Scholar 抓到（无 DOI）"与
+    # "另一次 Crossref 给了 DOI"会生成两个不同的 key，同一篇论文变成两行。
+    canonical_key: str = ""
+
     # ----------------------------------------------------------------- #
     @property
     def key(self) -> str:
-        return fingerprint(doi=self.doi, arxiv_id=self.arxiv_id, title=self.title)
+        return self.canonical_key or fingerprint(
+            doi=self.doi, arxiv_id=self.arxiv_id, title=self.title
+        )
 
     def merge(self, other: "Paper") -> "Paper":
-        """把另一条记录的有用字段补进来（自身优先，缺失才补）。"""
+        """把另一条记录的有用字段补进来（自身优先，缺失才补）。
+
+        例外：**发表处**按"正式程度"取优 —— arXiv 占位名不该压过正式会议/期刊名。
+        """
         if other is self:
             return self
-        for name in ("abstract", "venue", "venue_detail", "doi", "arxiv_id", "url", "item_type"):
+        if other.venue and venue_quality(other.venue) > venue_quality(self.venue):
+            self.venue = other.venue
+        for name in ("abstract", "venue_detail", "doi", "arxiv_id", "url", "item_type"):
             if not getattr(self, name) and getattr(other, name):
                 setattr(self, name, getattr(other, name))
         if self.year is None and other.year is not None:

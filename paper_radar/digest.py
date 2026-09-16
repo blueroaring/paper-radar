@@ -138,11 +138,25 @@ def run_digest(
                 summary["topics"].append(entry)
                 continue
 
+            # 必须先把论文写进 papers 表：collect() 按设计"只读不写"，
+            # 而下面的 save_recommendations / remember 都以 paper_key 外键引用它。
+            # 漏掉这一步会让推荐记录变成指向不存在论文的孤儿行（历史 bug）。
+            ctx.store.upsert_papers(papers)
+
             recs, provider = engine.summarize_papers(topic, papers, progress=progress)
             ctx.store.save_recommendations(
                 topic.id, recs, status="sent" if send else "shown", provider=provider
             )
-            items = [rec.to_dict() for rec in recs]
+
+            remembered: list[dict] = []
+            if bool(cfg.get("remember.apply_to_digest", True)):
+                remembered = engine.remember_high_scores(topic, recs, origin="digest", progress=progress)
+            entry["remembered"] = remembered
+            remembered_keys = engine.remembered_key_set()
+
+            items = [
+                {**rec.to_dict(), "remembered": rec.paper.key in remembered_keys} for rec in recs
+            ]
             entry["items"] = items
             entry["provider"] = provider
 

@@ -18,7 +18,8 @@
     <button data-tab="topics" class="active">① 研究方向</button>
     <button data-tab="results">② 检索推荐</button>
     <button data-tab="digest">③ 每日简报</button>
-    <button data-tab="settings">④ 设置</button>
+    <button data-tab="remembered">④ 高分记忆</button>
+    <button data-tab="settings">⑤ 设置</button>
   </nav>
 </header>
 
@@ -122,6 +123,7 @@
         <select id="z-collection" style="max-width:220px"><option value="">（Zotero 默认分类）</option></select>
         <input type="text" id="z-tags" placeholder="标签，逗号分隔" style="max-width:220px">
         <button class="act primary" id="btn-add-zotero">加入 Zotero</button>
+        <button class="act" id="btn-remember">★ 记入高分记忆</button>
       </div>
       <div class="scroll">
         <table>
@@ -190,6 +192,83 @@
         <h3>最近运行</h3>
         <div id="run-list" class="small muted">暂无记录。</div>
       </div>
+    </div>
+  </section>
+
+  <!-- ============================ 高分记忆 ============================ -->
+  <section id="tab-remembered" class="tab">
+    <div class="card">
+      <h2>高分记忆</h2>
+      <p class="hint">
+        相关度达到阈值的论文会自动记在这里，跨检索、跨简报长期保留（不会因为换方向或重跑而丢）。
+        阈值只是**自动记忆**的门槛 —— 你也可以在「检索推荐」里手动把任意论文记进来。
+      </p>
+      <div class="grid three">
+        <div>
+          <label for="m-threshold">相关度阈值（0~1，越高越严格）</label>
+          <input type="number" id="m-threshold" min="0" max="1" step="0.05" value="0.6">
+          <div class="muted small" id="m-threshold-hint"></div>
+        </div>
+        <div>
+          <label for="m-feedback-max">回填种子上限（仅下项开启时生效）</label>
+          <input type="number" id="m-feedback-max" min="0" max="50" value="5">
+        </div>
+        <div>
+          <label>开关</label>
+          <label class="row small"><input type="checkbox" id="m-enabled" style="width:auto"> 启用高分记忆</label>
+          <label class="row small"><input type="checkbox" id="m-search" style="width:auto"> 手动检索时记忆</label>
+          <label class="row small"><input type="checkbox" id="m-digest" style="width:auto"> 每日简报时记忆</label>
+          <label class="row small" title="开启后，高分论文会被追加为该方向的种子论文，从而影响后续检索式">
+            <input type="checkbox" id="m-feedback" style="width:auto"> 高分论文回填为种子（会改变后续检索）
+          </label>
+        </div>
+      </div>
+      <div>
+        <button class="act primary" id="btn-save-remember">保存设置</button>
+        <button class="act" id="btn-backfill">按当前阈值回填历史推荐</button>
+        <span class="muted" id="m-summary"></span>
+      </div>
+      <pre class="log" id="remember-log" style="display:none"></pre>
+      <div class="status" id="remember-status"></div>
+    </div>
+
+    <div class="card">
+      <h2>记忆清单</h2>
+      <p class="hint">批注框里写完点一下别处即可保存。导出格式可选 Markdown / BibTeX / CSV / JSON。</p>
+      <div class="row" style="margin-bottom:12px">
+        <button class="act" id="btn-m-all">全选</button>
+        <button class="act" id="btn-m-none">清空</button>
+        <span class="muted" id="m-count">共 0 篇</span>
+        <span class="grow"></span>
+        <select id="m-export-format" style="max-width:150px">
+          <option value="markdown">Markdown</option>
+          <option value="bibtex">BibTeX</option>
+          <option value="csv">CSV</option>
+          <option value="json">JSON</option>
+        </select>
+        <button class="act" id="btn-m-export">下载</button>
+        <button class="act" id="btn-m-copy">复制</button>
+        <button class="act primary" id="btn-m-zotero">加入 Zotero</button>
+        <button class="act danger" id="btn-m-forget">忘记所选</button>
+      </div>
+      <div class="scroll">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:34px"><input type="checkbox" id="m-check-all" style="width:auto"></th>
+              <th>论文</th>
+              <th style="width:150px">发表在哪里</th>
+              <th style="width:64px">相关度</th>
+              <th style="width:86px">记住于</th>
+              <th style="width:20%">内容概要</th>
+              <th style="width:16%">文章特色</th>
+              <th style="width:14%">我的批注</th>
+            </tr>
+          </thead>
+          <tbody id="m-body"><tr><td colspan="8" class="muted">还没有记忆条目。</td></tr></tbody>
+        </table>
+      </div>
+      <div class="status" id="m-status"></div>
     </div>
   </section>
 
