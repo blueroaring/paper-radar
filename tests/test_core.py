@@ -642,25 +642,74 @@ class TestHighScoreMemory(unittest.TestCase):
         self.assertEqual(self.store.count_papers(), 1, "同一篇论文不该有两行")
 
     def test_dedupe_papers_repairs_history(self):
-        """老数据里已经存在的重复行，用 dedupe_papers 合并回一条且不留孤儿。"""
-        a = Paper(title="Same Paper", source="google_scholar", sources=["google_scholar"])
-        b = Paper(
-            title="Same paper!",
-            doi="10.1/same",
-            source="crossref",
-            sources=["crossref"],
-            abstract="长摘要" * 20,
+        """用原始 SQL 伪造"旧版本写下的"重复行，验证修复作业能合并且不留孤儿。
+
+        （不能再用 upsert_papers 造重复：存储层现在有身份兜底，压根不会写出重复行。）
+        """
+        self.store.upsert_papers(
+            [Paper(title="Same Paper", source="google_scholar", sources=["google_scholar"])]
         )
-        self.store.upsert_papers([a, b])
-        self.assertEqual(self.store.count_papers(), 2)
-        self.store.remember(self.topic, [self._rec(a, 0.9, summary="S")], min_score=0.6)
-        self.store.save_recommendations(self.topic.id, [self._rec(a, 0.9)], status="shown")
+        # 模拟老数据：绕过身份兜底，直接塞第二行（同一篇论文的带 DOI 版本）
+        self.store.conn.execute(
+            """INSERT INTO papers (key, title, authors, year, venue, venue_detail, doi, arxiv_id,
+               url, abstract, item_type, citations, source, sources, extra, first_seen, last_seen,
+               title_norm)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "doi:legacy0001",
+                "Same paper!",
+                "[]",
+                2025,
+                "EuroSys 2025",
+                "",
+                "10.1/same",
+                "",
+                "",
+                "长摘要" * 20,
+                "conferencePaper",
+                9,
+                "crossref",
+                '["crossref"]',
+                "{}",
+                "2026-09-15T00:00:00",
+                "2026-09-15T00:00:00",
+                normalize_title("Same paper!"),
+            ),
+        )
+        self.store.conn.commit()
+        self.assertEqual(self.store.count_papers(), 2, "伪造的历史脏数据应有两行")
+
+        # 记忆与推荐挂在"旧的标题键"上，修复时必须跟着搬走
+        old_key = self.store.conn.execute(
+            "SELECT key FROM papers WHERE key LIKE 'title:%'"
+        ).fetchone()["key"]
+        self.store.remember(
+            self.topic,
+            [self._rec(Paper(title="Same Paper"), 0.9, summary="S")],
+            min_score=0.6,
+        )
+        self.store.conn.execute(
+            "UPDATE remembered SET paper_key = ? WHERE paper_key != ?", (old_key, old_key)
+        )
+        self.store.conn.commit()
 
         result = self.store.dedupe_papers()
         self.assertEqual(result["groups_merged"], 1)
         self.assertEqual(result["rows_removed"], 1)
         self.assertEqual(self.store.count_papers(), 1)
+        # 保留的是 DOI 键，且拿到了更正式的数据
+        survivor = self.store.conn.execute("SELECT key, venue, citations FROM papers").fetchone()
+        self.assertEqual(survivor["key"], "doi:legacy0001")
+        self.assertEqual(survivor["venue"], "EuroSys 2025")
+        self.assertEqual(survivor["citations"], 9)
+        # 记忆要跟过来，且不能变成孤儿
         self.assertEqual(len(self.store.list_remembered()), 1)
+        self.assertEqual(
+            self.store.conn.execute(
+                "SELECT paper_key FROM remembered"
+            ).fetchone()["paper_key"],
+            "doi:legacy0001",
+        )
         for table in ("remembered", "recommendations"):
             orphans = self.store.conn.execute(
                 f"SELECT COUNT(*) AS c FROM {table} t LEFT JOIN papers p ON p.key=t.paper_key WHERE p.key IS NULL"
@@ -668,22 +717,65 @@ class TestHighScoreMemory(unittest.TestCase):
             self.assertEqual(orphans, 0, f"{table} 不应留下孤儿")
         self.assertEqual(self.store.dedupe_papers()["rows_removed"], 0)
 
-    def test_upsert_never_downgrades_venue(self):
-        """后续某次只有 arXiv 返回该论文时，不能把已存的正式会议名覆盖掉。"""
-        paper = Paper(title="Occamy", doi="10.1/o", venue="EuroSys 2025", source="crossref", sources=["crossref"])
+    def test_upsert_never_downgrades_venue_or_doi(self):
+        """后续某次只有 arXiv 返回该论文时，不能把正式会议名/出版社 DOI 覆盖掉。"""
+        paper = Paper(
+            title="Occamy",
+            doi="10.1145/3689031.3717495",
+            venue="EuroSys 2025",
+            source="crossref",
+            sources=["crossref"],
+        )
         self.store.upsert_papers([paper])
         again = Paper(
             title="Occamy",
-            doi="10.1/o",
+            doi="10.48550/arXiv.2501.13570",
             venue="arXiv preprint (cs.NI)",
-            arxiv_id="2501.1",
+            arxiv_id="2501.13570",
             source="arxiv",
             sources=["arxiv"],
         )
         self.store.upsert_papers([again])
-        row = self.store.conn.execute("SELECT venue, arxiv_id FROM papers WHERE key = ?", (paper.key,)).fetchone()
+        row = self.store.conn.execute(
+            "SELECT venue, doi, arxiv_id FROM papers WHERE key = ?", (paper.key,)
+        ).fetchone()
         self.assertEqual(row["venue"], "EuroSys 2025", "正式会议名只升不降")
-        self.assertEqual(row["arxiv_id"], "2501.1", "其他字段照常补齐")
+        self.assertEqual(row["doi"], "10.1145/3689031.3717495", "出版社 DOI 优先于 arXiv DOI")
+        self.assertEqual(row["arxiv_id"], "2501.13570", "其他字段照常补齐")
+
+    def test_doi_quality(self):
+        from paper_radar.models import doi_quality
+
+        self.assertEqual(doi_quality(""), 0)
+        self.assertEqual(doi_quality("10.48550/arXiv.2501.13570"), 1)
+        self.assertEqual(doi_quality("10.1145/3689031.3717495"), 2)
+        # 合并时保留更正式的那个 DOI
+        pre = Paper(title="X", doi="10.48550/arXiv.2501.1", venue="arXiv preprint", source="a", sources=["a"])
+        conf = Paper(title="X", doi="10.1145/1.2", venue="SIGCOMM", source="b", sources=["b"])
+        pre.merge(conf)
+        self.assertEqual(pre.doi, "10.1145/1.2")
+        self.assertEqual(pre.venue, "SIGCOMM")
+
+    def test_bibtex_promotes_formally_published_preprints(self):
+        """来自 arXiv 但已正式发表的记录，不该导出成 @misc。"""
+        preprint_only = {
+            "title": "Only On arXiv",
+            "item_type": "preprint",
+            "venue": "arXiv preprint (cs.NI)",
+            "authors": ["A B"],
+            "year": 2026,
+        }
+        published = {
+            "title": "Occamy",
+            "item_type": "preprint",
+            "venue": "Proceedings of the Twentieth European Conference on Computer Systems",
+            "authors": ["A B"],
+            "year": 2025,
+        }
+        bib = render.to_bibtex([preprint_only, published])
+        self.assertIn("@misc{", bib, "纯预印本仍应是 @misc")
+        self.assertIn("@inproceedings{", bib, "已正式发表的应按会议论文导出")
+        self.assertIn("booktitle = {Proceedings of the Twentieth European Conference", bib)
 
     def test_dedupe_papers_keeps_the_formal_venue(self):
         """合并重复行时，「发表在哪里」要保留正式会议名，而不是 arXiv 占位名。"""
@@ -694,20 +786,38 @@ class TestHighScoreMemory(unittest.TestCase):
             sources=["openalex"],
             abstract="短",
         )
-        conf = Paper(
-            title="Occamy",
-            venue="EuroSys 2025",
-            doi="10.1/occamy",
-            source="crossref",
-            sources=["crossref"],
-            citations=7,
+        self.store.upsert_papers([pre])
+        self.store.conn.execute(
+            """INSERT INTO papers (key, title, authors, year, venue, venue_detail, doi, arxiv_id,
+               url, abstract, item_type, citations, source, sources, extra, first_seen, last_seen,
+               title_norm) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "doi:legacy0002",
+                "Occamy",
+                "[]",
+                2025,
+                "EuroSys 2025",
+                "",
+                "10.1/occamy",
+                "",
+                "",
+                "",
+                "conferencePaper",
+                7,
+                "crossref",
+                '["crossref"]',
+                "{}",
+                "2026-09-15T00:00:00",
+                "2026-09-15T00:00:00",
+                normalize_title("Occamy"),
+            ),
         )
-        self.store.upsert_papers([pre, conf])
+        self.store.conn.commit()
         self.store.dedupe_papers()
         self.assertEqual(self.store.count_papers(), 1)
-        survivors = self.store.conn.execute("SELECT key, venue, citations FROM papers").fetchall()
-        self.assertEqual(survivors[0]["venue"], "EuroSys 2025")
-        self.assertEqual(survivors[0]["citations"], 7)
+        row = self.store.conn.execute("SELECT key, venue, citations FROM papers").fetchone()
+        self.assertIn("EuroSys", row["venue"], "正式会议名应胜出")
+        self.assertEqual(row["citations"], 7)
 
     def test_exporters_cover_all_fields(self):
         item = {

@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from .models import Paper, Recommendation, Seed, Topic, normalize_title, venue_quality
+from .models import Paper, Recommendation, Seed, Topic, doi_quality, normalize_title, venue_quality
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS topics (
@@ -365,13 +365,30 @@ class Store:
             for paper in papers:
                 if not paper.title:
                     continue
-                # 发表处只升不降：已有的正式会议/期刊名不能被后续某次只有 arXiv 的结果覆盖
-                venue = paper.venue
-                previous = self.conn.execute(
-                    "SELECT venue FROM papers WHERE key = ?", (paper.key,)
+                norm = normalize_title(paper.title)
+                # 身份兜底（存储层，不依赖调用方）：同一归一化标题若已存在记录，
+                # 就把这次写入归到那条记录上。否则"某轮只有无 DOI 的源命中"会新建一行，
+                # 与后来带 DOI 的那行分裂成两条 —— 而且调用方越多样（UI/CLI/回填/定时任务）
+                # 越容易漏掉某一处。
+                key = paper.key
+                existing = self.conn.execute(
+                    "SELECT key FROM papers WHERE title_norm = ? LIMIT 1", (norm,)
                 ).fetchone()
-                if previous and venue_quality(previous["venue"] or "") > venue_quality(venue or ""):
-                    venue = previous["venue"] or ""
+                if existing and existing["key"] != key:
+                    key = existing["key"]
+                    paper.canonical_key = key
+                # 发表处与 DOI 都"只升不降"：已有的正式会议名/出版社 DOI
+                # 不能被后续某次只有 arXiv 的结果覆盖
+                venue = paper.venue
+                doi = paper.doi
+                previous = self.conn.execute(
+                    "SELECT venue, doi FROM papers WHERE key = ?", (key,)
+                ).fetchone()
+                if previous:
+                    if venue_quality(previous["venue"] or "") > venue_quality(venue or ""):
+                        venue = previous["venue"] or ""
+                    if doi_quality(previous["doi"] or "") > doi_quality(doi or ""):
+                        doi = previous["doi"] or ""
                 self.conn.execute(
                     """INSERT INTO papers (key, title, authors, year, venue, venue_detail, doi, arxiv_id,
                        url, abstract, item_type, citations, source, sources, extra, first_seen, last_seen,
@@ -383,7 +400,7 @@ class Store:
                          authors=excluded.authors,
                          year=COALESCE(excluded.year, papers.year),
                          venue=excluded.venue,
-                         doi=CASE WHEN excluded.doi != '' THEN excluded.doi ELSE papers.doi END,
+                         doi=excluded.doi,
                          arxiv_id=CASE WHEN excluded.arxiv_id != '' THEN excluded.arxiv_id ELSE papers.arxiv_id END,
                          url=CASE WHEN excluded.url != '' THEN excluded.url ELSE papers.url END,
                          abstract=CASE WHEN length(excluded.abstract) > length(papers.abstract)
@@ -394,13 +411,13 @@ class Store:
                          extra=excluded.extra,
                          last_seen=excluded.last_seen""",
                     (
-                        paper.key,
+                        key,
                         paper.title,
                         _dumps(paper.authors),
                         paper.year,
                         venue,
                         paper.venue_detail,
-                        paper.doi,
+                        doi,
                         paper.arxiv_id,
                         paper.url,
                         paper.abstract,
@@ -411,7 +428,7 @@ class Store:
                         _dumps(paper.extra),
                         stamp,
                         stamp,
-                        normalize_title(paper.title),
+                        norm,
                     ),
                 )
                 count += 1

@@ -40,6 +40,21 @@ def venue_quality(venue: str) -> int:
     return 2
 
 
+def doi_quality(doi: str) -> int:
+    """DOI"正式程度"：0 空 / 1 预印本仓储 DOI / 2 出版社注册 DOI。
+
+    arXiv 会通过 DataCite 给预印本发 DOI（`10.48550/arXiv.*`）。
+    同一篇论文既有它、又有出版社 DOI（`10.1145/...`、`10.1109/...`）时，
+    应该保留后者 —— 引用与查重都更可靠。
+    """
+    text = (doi or "").strip().lower()
+    if not text:
+        return 0
+    if "10.48550/arxiv" in text or text.startswith("arxiv:"):
+        return 1
+    return 2
+
+
 def normalize_title(title: str) -> str:
     """归一化标题，用于跨库去重（大小写、标点、空白差异都不该算两篇）。"""
     text = (title or "").strip().lower()
@@ -123,7 +138,9 @@ class Paper:
             return self
         if other.venue and venue_quality(other.venue) > venue_quality(self.venue):
             self.venue = other.venue
-        for name in ("abstract", "venue_detail", "doi", "arxiv_id", "url", "item_type"):
+        if other.doi and doi_quality(other.doi) > doi_quality(self.doi):
+            self.doi = other.doi
+        for name in ("abstract", "venue_detail", "arxiv_id", "url", "item_type"):
             if not getattr(self, name) and getattr(other, name):
                 setattr(self, name, getattr(other, name))
         if self.year is None and other.year is not None:

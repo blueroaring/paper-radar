@@ -279,10 +279,16 @@ def _bib_key(item: dict) -> str:
 
 def to_bibtex(items: list[Any]) -> str:
     """BibTeX：可以直接 `\\input` 进 LaTeX，或拖进 Zotero / EndNote 导入。"""
+    from .models import venue_quality
+
     chunks = []
     for raw in items:
         item = normalize_item(raw)
         entry_type = _BIB_TYPES.get(item.get("item_type", ""), "article")
+        # 记录来自 arXiv（item_type=preprint），但发表处已经是正式会议/期刊时，
+        # 说明这篇已经正式发表 —— 直接按会议论文导出，别给用户一条 @misc。
+        if entry_type == "misc" and venue_quality(item.get("venue", "")) == 2:
+            entry_type = "inproceedings"
         fields: list[tuple[str, str]] = [("title", "{" + item["title"] + "}")]
         if item.get("authors"):
             fields.append(("author", " and ".join(item["authors"])))
