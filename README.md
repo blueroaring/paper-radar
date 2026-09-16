@@ -133,10 +133,15 @@ config.example.json   （仓库内置默认值，唯一业务参数来源）
 三种方式任选：
 
 1. **常驻进程（最简单）**：`python -m paper_radar serve` 或 `daemon`，内置定时器按 `digest.time` 触发；
-2. **Windows 计划任务**：用 `scripts/install_task.ps1` 注册，或手动 `schtasks`，命令写 `python -m paper_radar digest --send`；
+2. **Windows 计划任务（推荐主力）**：`powershell -File scripts\install_task.ps1 -Send`；
 3. **Linux / macOS cron**：`30 8 * * * cd /path/to/paper-radar && python3 -m paper_radar digest --send`
 
-内置定时器有三个好处：改时间立刻生效（不用重启）、电脑休眠错过后当天会补跑、每天只触发一次。
+内置定时器有三个好处：改时间立刻生效（不用重启）、电脑休眠错过后当天会补跑（窗口 180 分钟）、每天只触发一次。
+
+计划任务那一侧要留意：`schtasks /Create` 的默认设置是 **错过不补跑 + 用电池不启动**，
+到点时电脑关着就会被**静默跳过**（不报错、不提醒）。`scripts/install_task.ps1` 用 ScheduledTasks 模块
+显式改掉了这三项，并提供 `-Test`（立即试跑）与 `-Wake`（到点唤醒电脑）。
+完整排查表和原理见 [`docs/SETUP.md` 第 8 节](docs/SETUP.md)。
 
 ---
 

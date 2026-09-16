@@ -143,10 +143,14 @@ powershell -ExecutionPolicy Bypass -File scripts\install_shortcut.ps1
 # 以当前用户身份注册：每天 08:30 跑一次并真的发信
 powershell -ExecutionPolicy Bypass -File scripts\install_task.ps1 -Time 08:30 -Send
 
-# 查看 / 删除
-schtasks /Query /TN PaperRadar-Digest /V /FO LIST
-schtasks /Delete /TN PaperRadar-Digest /F
+# 查看 / 立即试跑 / 删除
+Get-ScheduledTaskInfo -TaskName PaperRadar-Digest
+powershell -ExecutionPolicy Bypass -File scripts\install_task.ps1 -Test
+powershell -ExecutionPolicy Bypass -File scripts\install_task.ps1 -Remove
 ```
+
+> **笔记本用户必读**：注册时会显式打开"错过补跑"（`StartWhenAvailable`）并解除电池限制。
+> 不设这些，到点时电脑关着/用电池，任务会**静默跳过且不补跑** —— 详见第 8 节的排障表。
 
 ### 方案 C：Linux / macOS cron
 
@@ -194,3 +198,69 @@ paper-radar/
 
 **Q：换电脑要重配吗？**
 把 `config.json` + `secrets.json` + `data/` 拷过去即可。仓库本身不含任何个人配置。
+
+---
+
+## 8. 排障：某天没收到邮件
+
+**先按这三条各查 10 秒，能定位九成情况：**
+
+```powershell
+# ① 计划任务到底跑没跑？（LastTaskResult=0 才是成功；267011=从未运行）
+Get-ScheduledTaskInfo -TaskName PaperRadar-Digest
+
+# ② 任务日志有没有今天的新内容？（cmd 的 >> 重定向，跑过就一定会写）
+Get-Item D:\paper-radar\logs\digest.log | Select-Object LastWriteTime
+Get-Content D:\paper-radar\logs\digest.log -Tail 15
+
+# ③ 有没有生成今天的报告？（有报告但没邮件 = 邮件配置问题；两者都没有 = 任务没跑）
+Get-ChildItem D:\paper-radar\data\reports | Sort-Object LastWriteTime -Descending | Select-Object -First 3
+```
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| `LastRunTime` 停在几天前，日志/报告也没有新的 | **到点时电脑是关机/睡眠的**，而且任务没设"错过补跑" | 见下方"任务设置"；临时补一次：`scripts\install_task.ps1 -Test` |
+| `LastTaskResult` 不是 0 | 命令本身失败了（Python 路径变了、配置坏了……） | 看 `digest.log` 末尾的报错；再手动跑一次 `python -m paper_radar digest --send` 复现 |
+| 有报告、但没邮件 | SMTP 授权码过期 / 收件人为空 / `mail.enabled=false` | 控制台 ④ 设置 → 邮件 →「发一封测试邮件」 |
+| 报告里 0 篇，所以没发信 | 当天确实没有**没推送过**的新论文（`only_new`） | 正常行为。想放宽：加大 `digest.lookback_days` 或降低 `digest.min_score` |
+
+### 任务设置：笔记本上必须改默认值
+
+`schtasks /Create` 的默认设置会让笔记本**静默跳过**每日任务 —— 不报错、不提醒：
+
+| 设置 | schtasks 默认 | 后果 | 应该设为 |
+|---|---|---|---|
+| `StartWhenAvailable` | `false` | 关机/睡眠错过了就**永远不补跑** | `true` |
+| `DisallowStartIfOnBatteries` | `true` | **用电池时根本不启动** | `false` |
+| `StopIfGoingOnBatteries` | `true` | 跑一半拔电源就被杀 | `false` |
+
+`schtasks.exe` **没有**设置这三项的开关，必须用 PowerShell 的 ScheduledTasks 模块。本仓库的 `scripts\install_task.ps1` 已经正确处理：
+
+```powershell
+# 重新注册（默认就带上面三项的正确值）
+powershell -ExecutionPolicy Bypass -File scripts\install_task.ps1 -Send
+
+# 额外让它在到点时把电脑从睡眠唤醒（笔记本用电池时会吓人，默认关）
+powershell -ExecutionPolicy Bypass -File scripts\install_task.ps1 -Send -Wake
+```
+
+核对是否真的生效（**别只看注册时的回显**）：
+
+```powershell
+$s = (Get-ScheduledTask -TaskName PaperRadar-Digest).Settings
+$s | Select-Object StartWhenAvailable, DisallowStartIfOnBatteries, StopIfGoingOnBatteries, WakeToRun
+```
+
+### 双保险：让控制台也常驻
+
+计划任务之外，控制台自己带的定时器也会在到点时发信（改时间立刻生效，且有 180 分钟补跑窗口）。把它加到开机启动，就多一层保险：
+
+```
+Win+R → shell:startup → 把 run.bat 的快捷方式丢进去
+```
+
+两层同时开**不会重复发信**：每日简报只推"这个方向从未推送过"的论文，第二次运行会发现没有新论文而静默跳过。
+
+> ⚠️ 注意：控制台的补跑窗口是 180 分钟（`digest.catch_up_window_minutes`），
+> 所以上午 11:30 之后才开机的话，它不会补发；**计划任务的 `StartWhenAvailable` 没有这个窗口限制**，
+> 开机后就会补跑一次。这也是为什么推荐用计划任务作为主力。
