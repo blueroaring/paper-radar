@@ -280,6 +280,20 @@ async function runSearch(rebuild = false) {
   });
 }
 
+/**
+ * 分数列怎么显示。
+ * 脉络模式下这一列是「相关度」而不是混合总分 —— 总分里混了年份和引用数，
+ * 会把 1998 年的奠基工作压得很低，看起来像"不重要"。
+ * 而脉络起点是你指定的锚点，根本没参与语义打分，显示 0 更误导 → 用破折号。
+ */
+function scoreCell(p, lineage, isOrigin) {
+  if (lineage && isOrigin) {
+    return '<span class="muted" title="脉络起点是锚点，不参与相关度打分">—</span>';
+  }
+  const part = lineage ? ((p.score_parts || {}).relevance ?? p.score) : p.score;
+  return String(Math.round((part || 0) * 100));
+}
+
 function renderResults() {
   const body = $("results-body");
   const lineage = S.lastMode === "lineage";
@@ -313,7 +327,8 @@ function renderResults() {
     ].filter(Boolean).join(" · ");
     const tier = p.extra && p.extra.venue_tier && p.extra.venue_tier !== "unknown" ? ` <span class="pill">${esc(p.extra.venue_tier)}</span>` : "";
     const star = p.remembered ? ' <span class="pill star">★ 高分记忆</span>' : "";
-    const origin = p.extra && p.extra.is_origin
+    const isOrigin = !!(p.extra && p.extra.is_origin);
+    const origin = isOrigin
       ? ` <span class="pill origin" title="${esc((p.extra.origin_why) || "")}">★ 奠基</span>`
       : "";
     const hl = (p.highlights || []).map((h) => `<li>${esc(h)}</li>`).join("");
@@ -324,7 +339,7 @@ function renderResults() {
         <td>${esc(p.summary || "—")}</td>
         <td><ul class="hl">${hl || "<li>—</li>"}</ul></td>
         <td>${esc(p.reason || "—")}</td>
-        <td class="score">${Math.round((lineage ? ((p.score_parts || {}).relevance ?? p.score ?? 0) : (p.score || 0)) * 100)}</td>
+        <td class="score">${scoreCell(p, lineage, isOrigin)}</td>
       </tr>`);
   });
   body.innerHTML = rows.join("");
