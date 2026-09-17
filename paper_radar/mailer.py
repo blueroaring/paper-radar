@@ -26,35 +26,77 @@ class Transport:
         raise NotImplementedError
 
 
+SMTP_HINT = (
+    "这个报错通常是**网络层有代理/VPN 在拦 SMTP**（例如 Clash 的 TUN 模式会把 "
+    "smtp.qq.com 解析成 198.18.x.x 的假 IP，再走代理节点，导致 TLS 握手被中断）。"
+    "处理办法：在代理规则里给邮件服务器域名加一条 DIRECT（Clash 示例："
+    "`DOMAIN-SUFFIX,qq.com,DIRECT`，并用 Parsers 的 prepend-rules 保证订阅更新后仍在），"
+    "或临时关闭 TUN 模式。用 `python scripts/diag_smtp.py` 可一键确认。"
+)
+
+
 class SmtpTransport(Transport):
     style = "smtp"
 
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        self.smtp = self.section.get("smtp", {}) or {}
+
+    # ------------------------------------------------------------------ #
+    def _attempt(self, host: str, port: int, security: str, message: EmailMessage) -> None:
+        timeout = float(self.section.get("timeout", 30))
+        if security == "ssl":
+            server = smtplib.SMTP_SSL(host, port, timeout=timeout, context=ssl.create_default_context())
+        else:
+            server = smtplib.SMTP(host, port, timeout=timeout)
+            server.ehlo()
+            if security == "starttls":
+                server.starttls(context=ssl.create_default_context())
+                server.ehlo()
+        with server:
+            username = (self.smtp.get("username") or "").strip()
+            password = self.smtp.get("password") or ""
+            if username and password:
+                server.login(username, password)
+            server.send_message(message)
+
+    def _endpoints(self) -> list[tuple[int, str]]:
+        """发信端点列表：主用配置，再附上备用端口（465↔587 互备）。
+
+        为什么需要备用：某些网络/代理只放行其中一个端口。
+        """
+        primary = (int(self.smtp.get("port", 465)), (self.smtp.get("security") or "ssl").lower())
+        out = [primary]
+        fallback_port = int(self.smtp.get("fallback_port", 587 if primary[0] == 465 else 465))
+        fallback_security = (self.smtp.get("fallback_security") or ("starttls" if fallback_port == 587 else "ssl")).lower()
+        if (fallback_port, fallback_security) != primary:
+            out.append((fallback_port, fallback_security))
+        return out
+
     def send(self, message: EmailMessage) -> dict:
-        smtp = self.section.get("smtp", {}) or {}
-        host = (smtp.get("host") or "").strip()
+        host = (self.smtp.get("host") or "").strip()
         if not host:
             return {"ok": False, "transport": "smtp", "error": "未配置 mail.smtp.host"}
-        port = int(smtp.get("port", 465))
-        security = (smtp.get("security") or "ssl").lower()
-        username = (smtp.get("username") or "").strip()
-        password = smtp.get("password") or ""
-        timeout = float(self.section.get("timeout", 30))
-        try:
-            if security == "ssl":
-                server = smtplib.SMTP_SSL(host, port, timeout=timeout, context=ssl.create_default_context())
-            else:
-                server = smtplib.SMTP(host, port, timeout=timeout)
-                server.ehlo()
-                if security == "starttls":
-                    server.starttls(context=ssl.create_default_context())
-                    server.ehlo()
-            with server:
-                if username and password:
-                    server.login(username, password)
-                server.send_message(message)
-        except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "transport": "smtp", "error": f"{type(exc).__name__}: {exc}"}
-        return {"ok": True, "transport": "smtp", "to": message["To"]}
+        retries = max(1, int(self.section.get("retries", 2)))
+        errors: list[str] = []
+        for port, security in self._endpoints():
+            for attempt in range(1, retries + 1):
+                try:
+                    self._attempt(host, port, security, message)
+                except Exception as exc:  # noqa: BLE001
+                    detail = f"{host}:{port}/{security} 第{attempt}次 {type(exc).__name__}: {exc}"
+                    errors.append(detail)
+                    if attempt < retries:
+                        import time as _time
+
+                        _time.sleep(1.5 * attempt)  # TLS 被中途掐断常是瞬时的，退避后重试
+                    continue
+                result = {"ok": True, "transport": "smtp", "to": message["To"], "endpoint": f"{host}:{port}/{security}"}
+                if len(errors):
+                    result["note"] = "主端点失败后由备用端点成功：" + errors[-1]
+                return result
+        joined = " | ".join(errors[-3:])
+        return {"ok": False, "transport": "smtp", "error": joined, "hint": SMTP_HINT}
 
 
 class FileTransport(Transport):
@@ -158,4 +200,7 @@ class Mailer:
         message = self.build_message(subject=subject, html=html, text=text, to=recipients, cc=cc)
         result: dict[str, Any] = self.transport.send(message)
         result.setdefault("to", ", ".join(recipients))
+        if not result.get("ok"):
+            # 把"发信失败"在日志层面也说清楚，避免只出现在返回值里没人看见
+            print(f"[mailer] 发信失败：{result.get('error')}")
         return result

@@ -104,6 +104,12 @@ def main(argv: list[str] | None = None) -> int:
 
     p_dedupe = sub.add_parser("dedupe", help="合并历史遗留的重复论文行（同一篇论文的不同来源指纹）")
 
+    sub.add_parser(
+        "requeue-mail",
+        help="把发信失败却被标为已推送的论文退回待推送（下次运行自动重发）",
+    )
+    sub.add_parser("diag-mail", help="诊断邮件链路：DNS 解析 / 465 / 587 / 真实登录")
+
     p_sources = sub.add_parser("sources", help="列出/测试数据源")
     p_sources.add_argument("--test", action="store_true")
     p_sources.add_argument("--query", default="buffer management switch")
@@ -246,6 +252,21 @@ def main(argv: list[str] | None = None) -> int:
             except Exception as exc:  # noqa: BLE001
                 print(f"失败：{type(exc).__name__}: {exc}")
         return 0
+
+    if args.command == "requeue-mail":
+        result = ctx.store.requeue_failed_mail()
+        if not result["runs"]:
+            print("没有发现「发信失败却标记为已推送」的记录，无需处理。")
+            return 0
+        for run in result["runs"]:
+            print(f"  运行 #{run['run_id']}（{run['started_at'][:19]}）：退回 {run['keys']} 篇")
+        print(f"共退回 {result['requeued']} 条为待推送 —— 下次简报运行会自动重发这几篇。")
+        return 0
+
+    if args.command == "diag-mail":
+        from .diagnostics import diagnose_smtp
+
+        return diagnose_smtp(ctx.cfg)
 
     if args.command == "dedupe":
         result = ctx.store.dedupe_papers()

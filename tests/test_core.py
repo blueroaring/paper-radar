@@ -558,6 +558,189 @@ class TestDigestHelpers(unittest.TestCase):
         self.assertIn("no-year", titles)
 
 
+class TestMailDeliveryRobustness(unittest.TestCase):
+    """邮件发失败时不能把论文标成"已推送"，否则用户永远收不到那几篇。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Store(Path(self.tmp.name) / "m.db")
+        self.topic = Topic(name="交换机BM")
+        self.topic.id = self.store.save_topic(self.topic)
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def _recs(self, *titles):
+        recs = []
+        for title in titles:
+            paper = Paper(title=title, doi=f"10.1/{title}", source="t", sources=["t"])
+            self.store.upsert_papers([paper])
+            recs.append(Recommendation(paper=paper, score=0.7))
+        return recs
+
+    def test_failed_send_keeps_papers_retryable(self):
+        """关键回归：发信失败后，这些论文必须还能被下次简报重新捡起来。
+
+        踩过的坑：先标 sent 再发信 → 一次网络故障就永久吞掉那几篇；
+        后来改成退回 shown 也不够 —— only_new 看的是"有没有记录"，
+        有记录就不再算新论文，于是既不会重发也永远不会被清理。
+        正确做法是引入 pending（待推送）状态，并让简报按它筛候选。
+        """
+        from paper_radar.digest import _finalize_mail_status
+
+        recs = self._recs("A", "B")
+        self.store.save_recommendations(self.topic.id, recs, status="pending")
+        logs: list[str] = []
+        ctx = type("Ctx", (), {"store": self.store})()
+
+        ok = _finalize_mail_status(
+            ctx, self.topic, recs, {"ok": False, "error": "SSLEOFError", "hint": "代理可能拦了 SMTP"}, logs.append
+        )
+        self.assertFalse(ok)
+        statuses = {r["status"] for r in self.store.list_recommendations(self.topic.id)}
+        self.assertEqual(statuses, {"pending"})
+        self.assertTrue(any("保持待推送" in line for line in logs))
+        self.assertTrue(any("排查提示" in line for line in logs))
+
+        # 下次简报必须能重新捡起这两篇
+        papers = [r.paper for r in recs]
+        self.assertEqual(len(self.store.filter_digest_pending(self.topic.id, papers)), 2)
+        self.assertEqual(len(self.store.filter_new(self.topic.id, papers)), 0, "filter_new 仍视其为已记录")
+
+    def test_successful_send_marks_sent_and_wont_resend(self):
+        from paper_radar.digest import _finalize_mail_status
+
+        recs = self._recs("C", "D")
+        self.store.save_recommendations(self.topic.id, recs, status="pending")
+        ctx = type("Ctx", (), {"store": self.store})()
+        ok = _finalize_mail_status(ctx, self.topic, recs, {"ok": True}, lambda _m: None)
+        self.assertTrue(ok)
+        statuses = {r["status"] for r in self.store.list_recommendations(self.topic.id)}
+        self.assertEqual(statuses, {"sent"})
+        papers = [r.paper for r in recs]
+        self.assertEqual(self.store.filter_digest_pending(self.topic.id, papers), [], "发过的不能再发")
+
+    def test_digest_pending_ignores_manually_shown(self):
+        """手动检索看过的（shown）不该再被邮件打扰。"""
+        recs = self._recs("E")
+        self.store.save_recommendations(self.topic.id, recs, status="shown")
+        self.assertEqual(self.store.filter_digest_pending(self.topic.id, [recs[0].paper]), [])
+
+    def test_dropped_status_stops_reevaluation(self):
+        """被阈值刷掉的候选标成 dropped 后，不该再进候选 —— 否则每天白评一遍。"""
+        recs = self._recs("G")
+        self.store.save_recommendations(self.topic.id, recs, status="pending")
+        self.assertEqual(len(self.store.filter_digest_pending(self.topic.id, [recs[0].paper])), 1)
+        self.store.set_status(self.topic.id, recs[0].paper.key, "dropped")
+        self.assertEqual(self.store.filter_digest_pending(self.topic.id, [recs[0].paper]), [])
+
+    def test_mark_judged_records_first_time_candidates(self):
+        """首次出现就被刷掉的候选必须留下记录，否则下次仍算"新论文"，每天重评。"""
+        p1 = Paper(title="首次出现但不够相关", doi="10.1/x1", source="t", sources=["t"])
+        p2 = Paper(title="已有记录", doi="10.1/x2", source="t", sources=["t"])
+        self.store.upsert_papers([p1, p2])
+        # p2 已有一条带卡片内容的 pending 记录
+        self.store.save_recommendations(
+            self.topic.id,
+            [Recommendation(paper=p2, score=0.5, summary="保留我", reason="R")],
+            status="pending",
+        )
+        created = self.store.mark_judged(self.topic.id, [p1, p2], status="dropped")
+        self.assertEqual(created, 1, "只有首次出现的那个才新建记录")
+        # 下次都不再是候选
+        self.assertEqual(self.store.filter_digest_pending(self.topic.id, [p1, p2]), [])
+        rows = {r["key"]: r for r in self.store.list_recommendations(self.topic.id)}
+        self.assertEqual(rows[p2.key]["summary"], "保留我", "已有卡片内容不能被覆盖")
+        self.store.set_status(self.topic.id, p1.key, "dropped")
+        self.assertEqual({r["status"] for r in self.store.list_recommendations(self.topic.id)}, {"dropped"})
+
+    def test_set_status_reports_zero_rows_on_key_mismatch(self):
+        """key 对不上时必须能看见（返回 0），而不是静默成功。"""
+        recs = self._recs("H")
+        self.store.save_recommendations(self.topic.id, recs, status="pending")
+        self.assertEqual(self.store.set_status(self.topic.id, recs[0].paper.key, "dropped"), 1)
+        self.assertEqual(self.store.set_status(self.topic.id, "doi:不存在的键", "dropped"), 0)
+        # 按标题定位则不受指纹变化影响
+        self.assertEqual(self.store.set_status_by_title(self.topic.id, recs[0].paper.title, "shown"), 1)
+        self.assertEqual(self.store.list_recommendations(self.topic.id)[0]["status"], "shown")
+
+    def test_requeue_failed_mail_sets_pending(self):
+        """requeue 命令必须把状态设成 pending，否则退回 shown 等于没退（不会被重发）。"""
+        recs = self._recs("F")
+        self.store.save_recommendations(self.topic.id, recs, status="sent")
+        run_id = self.store.start_run("digest", self.topic.id)
+        self.store.finish_run(
+            run_id,
+            status="ok",
+            stats={
+                "topic_id": self.topic.id,
+                "mail": {"ok": False, "error": "SSLEOFError"},
+                "items": [{"key": recs[0].paper.key, "title": "F"}],
+            },
+        )
+        result = self.store.requeue_failed_mail()
+        self.assertEqual(result["requeued"], 1)
+        self.assertEqual(self.store.list_recommendations(self.topic.id)[0]["status"], "pending")
+        self.assertEqual(len(self.store.filter_digest_pending(self.topic.id, [recs[0].paper])), 1)
+        # 成功的运行不该被动到
+        self.assertEqual(self.store.requeue_failed_mail()["requeued"], 0)
+
+    def test_smtp_endpoints_include_fallback_port(self):
+        from paper_radar.mailer import SmtpTransport
+
+        cfg = Config.load()
+        cfg.set("mail.smtp.port", 465)
+        cfg.set("mail.smtp.security", "ssl")
+        self.assertEqual(SmtpTransport(cfg)._endpoints(), [(465, "ssl"), (587, "starttls")])
+
+        cfg.set("mail.smtp.port", 587)
+        cfg.set("mail.smtp.security", "starttls")
+        self.assertEqual(SmtpTransport(cfg)._endpoints(), [(587, "starttls"), (465, "ssl")])
+
+    def test_smtp_falls_back_to_second_endpoint(self):
+        from email.message import EmailMessage
+
+        from paper_radar.mailer import SmtpTransport
+
+        cfg = Config.load()
+        cfg.set("mail.smtp.host", "smtp.example.com")
+        cfg.set("mail.smtp.port", 465)
+        cfg.set("mail.retries", 1)
+        transport = SmtpTransport(cfg)
+        tried: list[tuple[int, str]] = []
+
+        def fake_attempt(host, port, security, message):
+            tried.append((port, security))
+            if (port, security) == (465, "ssl"):
+                raise TimeoutError("模拟主端点被拦")
+
+        transport._attempt = fake_attempt  # type: ignore[assignment]
+        result = transport.send(EmailMessage())
+        self.assertTrue(result["ok"], "主端点失败后应由备用端点顶上")
+        self.assertEqual(tried, [(465, "ssl"), (587, "starttls")])
+        self.assertIn("note", result)
+
+    def test_smtp_reports_hint_when_all_endpoints_fail(self):
+        from email.message import EmailMessage
+
+        from paper_radar.mailer import SMTP_HINT, SmtpTransport
+
+        cfg = Config.load()
+        cfg.set("mail.smtp.host", "smtp.example.com")
+        cfg.set("mail.retries", 1)
+        transport = SmtpTransport(cfg)
+
+        def boom(*_a, **_k):
+            raise TimeoutError("模拟全挂")
+
+        transport._attempt = boom  # type: ignore[assignment]
+        result = transport.send(EmailMessage())
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["hint"], SMTP_HINT)
+        self.assertIn("TUN", result["hint"])
+
+
 class TestTitleSimilarity(unittest.TestCase):
     def test_gate_rejects_unrelated_fuzzy_match(self):
         original = "Themis: Scheduling-Aware Buffer Management for HBM-Based Hybrid Buffers"

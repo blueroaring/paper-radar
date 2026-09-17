@@ -276,8 +276,47 @@ Get-ChildItem D:\paper-radar\data\reports | Sort-Object LastWriteTime -Descendin
 |---|---|---|
 | `LastRunTime` 停在几天前，日志/报告也没有新的 | **到点时电脑是关机/睡眠的**，而且任务没设"错过补跑" | 见下方"任务设置"；临时补一次：`scripts\install_task.ps1 -Test` |
 | `LastTaskResult` 不是 0 | 命令本身失败了（Python 路径变了、配置坏了……） | 看 `digest.log` 末尾的报错；再手动跑一次 `python -m paper_radar digest --send` 复现 |
-| 有报告、但没邮件 | SMTP 授权码过期 / 收件人为空 / `mail.enabled=false` | 控制台 ⑤ 设置 → 邮件 →「发一封测试邮件」 |
+| **有报告、日志里写"邮件发送失败"** | 见下方"SMTP 被代理拦截" —— 这是最阴的一种 | `python -m paper_radar diag-mail` 定位，修好后 `python -m paper_radar requeue-mail` 退回重发 |
+| 有报告、但没邮件（日志里连失败都没有） | SMTP 授权码过期 / 收件人为空 / `mail.enabled=false` | 控制台 ⑤ 设置 → 邮件 →「发一封测试邮件」 |
 | 报告里 0 篇，所以没发信 | 当天确实没有**没推送过**的新论文（`only_new`） | 正常行为。想放宽：加大 `digest.lookback_days` 或降低 `digest.min_score` |
+
+### SMTP 被代理拦掉（"有报告但没收到邮件"的最常见原因）
+
+**症状**：`digest.log` 里出现 `SSLEOFError: [SSL: UNEXPECTED_EOF_WHILE_READING]` 或
+`handshake operation timed out`，报告正常生成，但邮件发不出去。
+
+**根因**：代理软件（Clash / v2rayN 等）开了 **TUN 模式**时，它会接管所有 TCP。
+若 SMTP 域名被解析到 fake-IP 段（`198.18.x.x`）而代理进程里没有对应映射
+（典型场景：代理刚随开机重启、系统 DNS 里还留着上一轮的 fake-IP），
+流量就还原不出域名、匹配不到 `DOMAIN-SUFFIX,qq.com,DIRECT` 这类规则，
+掉进兜底的 `MATCH,<代理>` → 代理节点封 SMTP 端口 → TLS 握手被中断
+（甚至直连真实 IP 也会被 TUN 接住而失败）。
+
+**一键诊断**：
+
+```bash
+python -m paper_radar diag-mail      # 依次查 DNS / 465 / 587 / 真实登录，并给出结论
+```
+
+看到「解析到 198.18/198.19 段」且两个端口都失败，就是这个问题。
+
+**处理**（按优先级）：
+
+1. `ipconfig /flushdns` 后重试 —— 让系统 DNS 重新走一遍代理、把 fake-IP 映射补上（最简单，常见有效）；
+2. 在代理规则里给邮件域名加 DIRECT，并用 Parsers 的 `prepend-rules` 固化
+   （Clash 示例：`DOMAIN-SUFFIX,qq.com,DIRECT`），避免订阅更新后规则被冲掉；
+3. 临时关闭 TUN 模式（改用系统代理）后重试。
+
+**修好后补发漏掉的那批**：
+
+```bash
+python -m paper_radar requeue-mail   # 把"发信失败"的那几批退回待推送
+python -m paper_radar digest --send  # 立即重发（不加 --send 只出报告）
+```
+
+> 发信失败时，Paper Radar 会把这些论文保持为 `pending`（待推送），**不会**标记成"已推送"，
+> 所以下次定时运行也会自动重发。`requeue-mail` 是用来修复**旧版本**留下的、
+> 已经被错误标成"已推送"的历史记录。
 
 ### 任务设置：笔记本上必须改默认值
 

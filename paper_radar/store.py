@@ -490,6 +490,25 @@ class Store:
     def filter_new(self, topic_id: int, papers: list[Paper]) -> list[Paper]:
         return [p for p in papers if self.is_new_for_topic(topic_id, p.key)]
 
+    def filter_digest_pending(self, topic_id: int, papers: list[Paper]) -> list[Paper]:
+        """每日简报的候选：**从未处理过**的，或**上次想发但没发出去**（status=pending）的。
+
+        为什么不直接用 filter_new：手动检索会把论文记成 shown（"我看过了"），
+        这类不该再被邮件打扰；而简报发信失败的那批必须是 pending，
+        否则它们既不会重发（有记录 → 不算新），也永远不会被清理。
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT paper_key, status FROM recommendations WHERE topic_id = ?", (topic_id,)
+            ).fetchall()
+        status = {row["paper_key"]: row["status"] for row in rows}
+        out = []
+        for paper in papers:
+            current = status.get(paper.key)
+            if current is None or current == "pending":
+                out.append(paper)
+        return out
+
     def list_recommendations(self, topic_id: int, limit: int = 50) -> list[dict]:
         with self._lock:
             rows = self.conn.execute(
@@ -528,13 +547,121 @@ class Store:
             )
         return out
 
-    def set_status(self, topic_id: int, paper_key: str, status: str) -> None:
+    def set_status(self, topic_id: int, paper_key: str, status: str) -> int:
+        """按 paper_key 更新状态，返回受影响行数。
+
+        返回行数很重要：如果 key 与库里的不一致（例如同一篇论文这次带上了 DOI，
+        指纹从 title: 变成 doi:），UPDATE 会**静默匹配 0 行** —— 调用方必须能看到这件事。
+        """
         with self._lock:
-            self.conn.execute(
+            cur = self.conn.execute(
                 "UPDATE recommendations SET status = ? WHERE topic_id = ? AND paper_key = ?",
                 (status, topic_id, paper_key),
             )
             self.conn.commit()
+        return cur.rowcount
+
+    def mark_judged(self, topic_id: int, papers: list[Paper], *, status: str = "dropped", provider: str = "") -> int:
+        """给"已评判但未入选"的论文留下一条记录，返回新建的记录数。
+
+        为什么必须留痕：每日简报的候选是"没有任何记录"的论文。落选的候选如果不记，
+        下一次仍然算新论文 → 每天被重新抓取、重新语义评分 —— 白花钱，而且队列永不收敛。
+        已有记录只改状态（保留原来的卡片内容），没有记录才插入一条轻量的。
+        """
+        stamp = now_iso()
+        created = 0
+        with self._lock:
+            for paper in papers:
+                cur = self.conn.execute(
+                    "UPDATE recommendations SET status = ? WHERE topic_id = ? AND paper_key = ?",
+                    (status, topic_id, paper.key),
+                )
+                if cur.rowcount:
+                    continue
+                self.conn.execute(
+                    """INSERT OR IGNORE INTO recommendations
+                       (topic_id, paper_key, score, score_parts, summary, highlights, reason,
+                        status, provider, created_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        topic_id,
+                        paper.key,
+                        getattr(paper, "score", 0.0) or 0.0,
+                        _dumps(getattr(paper, "score_parts", {}) or {}),
+                        "",
+                        _dumps([]),
+                        "",
+                        status,
+                        provider,
+                        stamp,
+                    ),
+                )
+                created += 1
+            self.conn.commit()
+        return created
+
+    def set_status_by_title(self, topic_id: int, title: str, status: str) -> int:
+        """按**归一化标题**定位并更新状态，返回受影响行数。
+
+        用于"手里只有一个 Paper 对象、它的 key 可能还没和库里对齐"的场景
+        （例如某轮抓取时这篇论文多了 DOI，指纹变了）。走 papers.title_norm 定位，
+        因此不受指纹变化影响。
+        """
+        norm = normalize_title(title)
+        if not norm:
+            return 0
+        with self._lock:
+            cur = self.conn.execute(
+                """UPDATE recommendations SET status = ?
+                   WHERE topic_id = ?
+                     AND paper_key IN (SELECT key FROM papers WHERE title_norm = ?)""",
+                (status, topic_id, norm),
+            )
+            self.conn.commit()
+        return cur.rowcount
+
+    def requeue_failed_mail(self) -> dict:
+        """把"运行时报了发信失败、却已经被打上 sent"的记录退回 shown，以便下次重发。
+
+        为什么需要：早期版本的每日简报先标 sent 再发信，一次网络故障（例如代理拦掉 SMTP）
+        就会让那几篇被永久视为"已推送"。本作业依据 runs.stats 里记录的发信结果，
+        **只动确实失败的那几批**，不会把成功推送过的论文再发一遍。
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT id, topic_id, started_at, stats FROM runs
+                   WHERE kind = 'digest' ORDER BY id DESC LIMIT 200"""
+            ).fetchall()
+            requeued = 0
+            affected: list[dict] = []
+            for row in rows:
+                stats = _loads(row["stats"], {}) or {}
+                mail = stats.get("mail") or {}
+                if not mail or mail.get("ok"):
+                    continue  # 只处理"确实发信失败"的运行
+                topic_id = stats.get("topic_id") or row["topic_id"]
+                keys = [item.get("key") for item in (stats.get("items") or []) if item.get("key")]
+                if not keys:
+                    continue
+                for key in keys:
+                    # sent 与 shown 都要退回：早期版本在发信前就把状态写成 sent，
+                    # 中途又有版本写成 shown，两者都代表"这一批没真正发出去"。
+                    cur = self.conn.execute(
+                        """UPDATE recommendations SET status = 'pending'
+                           WHERE topic_id = ? AND paper_key = ? AND status IN ('sent', 'shown')""",
+                        (topic_id, key),
+                    )
+                    requeued += cur.rowcount
+                affected.append(
+                    {
+                        "run_id": row["id"],
+                        "started_at": row["started_at"],
+                        "topic_id": topic_id,
+                        "keys": len(keys),
+                    }
+                )
+            self.conn.commit()
+        return {"requeued": requeued, "runs": affected}
 
     # ------------------------------------------------------------------ #
     # Zotero 入库记录

@@ -56,6 +56,30 @@ def _subject(template: str, *, topic: Topic, count: int, date: str) -> str:
         return f"[Paper Radar] {date} · {topic.name} · {count} 篇新论文"
 
 
+def _finalize_mail_status(ctx, topic, recs, result, progress: Progress) -> bool:
+    """按发信结果更新"已推送"标记。
+
+    只有真的发出去了才升级成 sent；失败则保持 shown，下次运行会自动重试这几篇。
+    反过来的话（先标 sent 再发信），一次网络问题就会让论文永久沉默。
+    """
+    if result.get("ok"):
+        for rec in recs:
+            ctx.store.set_status(topic.id, rec.paper.key, "sent")
+        progress(f"[{topic.name}] 邮件已发送（{len(recs)} 篇）")
+        return True
+    # 失败：保持 pending（既不是"已推送"，也不等同于手动检索的 shown），
+    # 下次简报运行会把它重新捡起来重发。
+    for rec in recs:
+        ctx.store.set_status(topic.id, rec.paper.key, "pending")
+    progress(
+        f"[{topic.name}] 邮件发送失败：{result.get('error')} —— "
+        f"这 {len(recs)} 篇保持待推送，下次运行会自动重试"
+    )
+    if result.get("hint"):
+        progress(f"[{topic.name}] 排查提示：{result['hint']}")
+    return False
+
+
 def run_digest(
     ctx,
     *,
@@ -118,10 +142,13 @@ def run_digest(
             papers = filter_recent(papers, lookback_days=lookback_days)
             if only_new:
                 before = len(papers)
-                papers = ctx.store.filter_new(topic.id, papers)
-                progress(f"[{topic.name}] 过滤已推送：{before} → {len(papers)} 篇")
+                # 用 pending 过滤而不是 filter_new：手动检索看过的（shown）不再打扰，
+                # 但"上次想发却没发出去"的（pending）必须能被重新捡起来重发
+                papers = ctx.store.filter_digest_pending(topic.id, papers)
+                progress(f"[{topic.name}] 过滤已推送：{before} → {len(papers)} 篇（含上次未发出的）")
 
             # 先语义重排（只对前若干个候选，控制成本），再按最低分阈值剔除蹭关键词的论文
+            candidates = list(papers)
             papers = engine.rerank_with_llm(topic, papers[: max(top_n * 3, 10)], progress=progress)
             min_score = float(digest_cfg.get("min_score", 0.0) or 0.0)
             if min_score:
@@ -131,6 +158,19 @@ def run_digest(
                 papers = kept
             papers = papers[:top_n]
             entry["new"] = len(papers)
+
+            # 所有**被评判过**的候选都要落库：选中的进 pending/sent，落选的记 dropped。
+            # 不记的话落选者下次仍算"新论文"，会被反复重新抓取+语义评分
+            # —— 每天白花钱，而且待推送队列永不收敛。
+            ctx.store.upsert_papers(candidates)
+            kept_keys = {p.key for p in papers}
+            dropped = [p for p in candidates if p.key not in kept_keys]
+            if dropped and only_new:
+                created = ctx.store.mark_judged(topic.id, dropped, status="dropped")
+                progress(
+                    f"[{topic.name}] {len(dropped)} 篇判定为不够相关，已记为 dropped"
+                    f"（其中 {created} 篇是首次出现，下次不会再被重新评估）"
+                )
 
             if not papers:
                 progress(f"[{topic.name}] 没有新论文，跳过发信。")
@@ -144,9 +184,10 @@ def run_digest(
             ctx.store.upsert_papers(papers)
 
             recs, provider = engine.summarize_papers(topic, papers, progress=progress)
-            ctx.store.save_recommendations(
-                topic.id, recs, status="sent" if send else "shown", provider=provider
-            )
+            # 先按 pending（待推送）记录，**邮件真正发出去之后**才升级成 sent。
+            # 反过来（先标 sent 再发信）会让一次网络故障永久吞掉那几篇：
+            # 有记录 → 不算"新"；又是 sent → 不会再发。用户就永远收不到。
+            ctx.store.save_recommendations(topic.id, recs, status="pending", provider=provider)
 
             remembered: list[dict] = []
             if bool(cfg.get("remember.apply_to_digest", True)):
@@ -208,7 +249,7 @@ def run_digest(
                 )
                 entry["mail"] = result
                 summary["mail"].append({"topic": topic.name, **result})
-                progress(f"[{topic.name}] 邮件：{'已发送' if result.get('ok') else '失败 - ' + str(result.get('error'))}")
+                _finalize_mail_status(ctx, topic, recs, result, progress)
 
             summary["total_new"] += len(items)
             ctx.store.finish_run(run_id, status="ok", stats=entry, report_path=report_path)
