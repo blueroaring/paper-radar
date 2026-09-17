@@ -101,6 +101,8 @@
     "citation_saturation": 200,
     "llm_relevance_weight": 0.45,
     "rerank": true,
+    "exclude_seeds": true,
+    "exclude_already_added": true,
     "tier_score": { "S": 1.0, "A": 0.75, "B": 0.5, "unknown": 0.2 },
     "venue_tiers": {
       "S": [

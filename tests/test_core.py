@@ -741,6 +741,114 @@ class TestMailDeliveryRobustness(unittest.TestCase):
         self.assertIn("TUN", result["hint"])
 
 
+class TestExcludeKnownPapers(unittest.TestCase):
+    """用户已经知道的论文（方向种子 / 已入过 Zotero）不能再被推荐或发进简报。"""
+
+    def setUp(self):
+        self.topic = Topic(
+            name="交换机BM",
+            seeds=[
+                Seed(value="Themis: Scheduling-Aware Buffer Management for HBM-Based Hybrid Buffers"),
+                Seed(value="10.1145/3689031.3717495", title="Occamy"),
+                Seed(value="arXiv:2501.13570"),
+            ],
+        )
+
+    def test_seed_index_extracts_ids_and_titles(self):
+        from paper_radar.rank import seed_index
+
+        index = seed_index(self.topic.seeds)
+        self.assertIn("10.1145/3689031.3717495", index["doi"])
+        self.assertIn("2501.13570", index["arxiv"])
+        self.assertIn(
+            "themis scheduling aware buffer management for hbm based hybrid buffers", index["title"]
+        )
+
+    def test_doi_digits_are_not_mistaken_for_arxiv_id(self):
+        """真实误判：10.1145/3689031.3717495 里的 "9031.37174" 曾被当成 arXiv ID。"""
+        from paper_radar.rank import seed_index
+
+        index = seed_index([Seed(value="10.1145/3689031.3717495")])
+        self.assertEqual(index["arxiv"], set(), "DOI 数字不该被解析成 arXiv ID")
+
+    def test_seed_matched_by_title_doi_and_arxiv(self):
+        from paper_radar.rank import is_seed_paper, seed_index
+
+        index = seed_index(self.topic.seeds)
+        # 标题在库里可能带着花括号/大小写差异，归一化后应能命中
+        self.assertTrue(
+            is_seed_paper(
+                Paper(title="Themis:{Scheduling-Aware} Buffer Management for {HBM-Based} Hybrid Buffers"), index
+            )
+        )
+        self.assertTrue(is_seed_paper(Paper(title="Occamy", doi="10.1145/3689031.3717495"), index))
+        self.assertTrue(is_seed_paper(Paper(title="X", arxiv_id="2501.13570v2"), index))
+        self.assertFalse(is_seed_paper(Paper(title="An Unrelated Optics Paper"), index))
+
+    def test_engine_excludes_seeds_and_zotero_linked(self):
+        from paper_radar.engine import Context, Engine
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Config.load()
+            cfg.set("app.data_dir", tmp)
+            ctx = Context(cfg)
+            try:
+                engine = Engine(ctx)
+                topic = Topic(name="t", seeds=[Seed(value="10.1/seed", title="Seed Paper Title")])
+                topic.id = ctx.store.save_topic(topic)
+                seed_paper = Paper(title="Seed Paper Title", doi="10.1/seed", source="t", sources=["t"])
+                added = Paper(title="Already Added", doi="10.1/added", source="t", sources=["t"])
+                fresh = Paper(title="Brand New Work", doi="10.1/new", source="t", sources=["t"])
+                ctx.store.upsert_papers([seed_paper, added, fresh])
+                ctx.store.link_zotero(added.key, "ZOTKEY", added.title)
+
+                kept, excluded = engine.exclude_known(topic, [seed_paper, added, fresh])
+                self.assertEqual([p.title for p in kept], ["Brand New Work"])
+                self.assertEqual(excluded, 2)
+
+                # 关掉开关就该原样返回
+                cfg.set("search.exclude_seeds", False)
+                cfg.set("search.exclude_already_added", False)
+                kept, excluded = engine.exclude_known(topic, [seed_paper, added, fresh])
+                self.assertEqual(len(kept), 3)
+                self.assertEqual(excluded, 0)
+            finally:
+                ctx.store.close()
+
+
+class TestStaticRoutes(unittest.TestCase):
+    """报告文件名带中文，浏览器发的是百分号编码 —— 不解码就 404（真实故障）。"""
+
+    def test_resolves_percent_encoded_chinese_report_name(self):
+        import urllib.parse
+
+        from paper_radar.server import resolve_static_target
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Config.load()
+            cfg.set("app.data_dir", tmp)
+            name = "2026-09-17-1053-交换机缓冲管理.html"
+            report = cfg.reports_dir() / name
+            report.write_text("<html>ok</html>", encoding="utf-8")
+
+            # 浏览器实际发出的就是这种编码形式
+            encoded = "/reports/" + urllib.parse.quote(name)
+            self.assertIn("%E4%BA%A4", encoded)
+            self.assertEqual(resolve_static_target(cfg, encoded), report)
+            # 未编码的原始形式也应能解析
+            self.assertEqual(resolve_static_target(cfg, "/reports/" + name), report)
+            # 不存在的报告返回 None（调用方据此返回 404）
+            self.assertIsNone(resolve_static_target(cfg, "/reports/nope.html"))
+
+    def test_path_traversal_is_neutralized(self):
+        from paper_radar.server import resolve_static_target
+
+        cfg = Config.load()
+        # basename 只取最后一段，穿越路径解析不到文件
+        self.assertIsNone(resolve_static_target(cfg, "/reports/../../../Windows/System32/drivers/etc/hosts"))
+        self.assertIsNone(resolve_static_target(cfg, "/..%2f..%2fsecret.txt"))
+
+
 class TestTitleSimilarity(unittest.TestCase):
     def test_gate_rejects_unrelated_fuzzy_match(self):
         original = "Themis: Scheduling-Aware Buffer Management for HBM-Based Hybrid Buffers"

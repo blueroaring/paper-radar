@@ -54,6 +54,27 @@ class AppState:
 STATE: AppState | None = None
 
 
+def resolve_static_target(cfg, path: str) -> Path | None:
+    """把请求路径解析成磁盘上的文件，解析不到返回 None。
+
+    两个关键点：
+      1. **先做 URL 解码**：报告文件名带中文，浏览器发出的请求是百分号编码的
+         （`/reports/2026-09-17-1053-%E4%BA%A4...html`）。不解码就拼不出真实文件名，
+         表现为"文件明明在磁盘上，点开却 404"。
+      2. 只取 basename：顺带挡住 `../` 之类的路径穿越。
+    """
+    path = urllib.parse.unquote(path)
+    if path in ("/", "/index.html"):
+        target = WEB_DIR / "index.html"
+    elif path.startswith("/reports/"):
+        target = cfg.reports_dir() / posixpath.basename(path)
+    else:
+        target = WEB_DIR / posixpath.basename(path)
+    if target.exists() and target.is_file():
+        return target
+    return None
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "paper-radar/1.0"
     protocol_version = "HTTP/1.1"
@@ -163,15 +184,8 @@ class Handler(BaseHTTPRequestHandler):
     # 静态文件
     # ------------------------------------------------------------------ #
     def _static(self, path: str) -> None:
-        if path in ("/", "/index.html"):
-            target = WEB_DIR / "index.html"
-        elif path.startswith("/reports/"):
-            name = posixpath.basename(path)
-            target = self.state.ctx.cfg.reports_dir() / name
-        else:
-            name = posixpath.basename(path)
-            target = WEB_DIR / name
-        if not target.exists() or not target.is_file():
+        target = resolve_static_target(self.state.ctx.cfg, path)
+        if target is None:
             return self._error("未找到：" + path, 404)
         ctype = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
         if ctype.startswith("text/") or ctype in ("application/javascript", "application/json"):

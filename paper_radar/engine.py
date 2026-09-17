@@ -390,6 +390,9 @@ class Engine:
             limit=min(limit, int(cfg.get("search.max_candidates", 150))),
         )
         progress(f"去重后 {len(ranking.dedupe(collected))} 篇，选出 {len(ranked)} 篇")
+        ranked, excluded = self.exclude_known(topic, ranked)
+        if excluded:
+            progress(f"排除已知论文 {excluded} 篇（方向种子 / 已入过 Zotero 的）")
         self._canonicalize(ranked)
         return {
             "papers": ranked,
@@ -399,6 +402,32 @@ class Engine:
             "queries": queries,
             "year_from": year_from,
         }
+
+    def exclude_known(self, topic: Topic, papers: list[Paper]) -> tuple[list[Paper], int]:
+        """剔除用户**已经知道**的论文：方向的种子论文 + 已经入过 Zotero 的。
+
+        种子论文是用户自己提供的"已知工作"，被数据源反复抓到是常态；
+        不排除就会被当成新论文推荐、甚至发进每日简报 —— 用户会收到自己早就给过的东西。
+        两个开关都在 config（search.exclude_seeds / search.exclude_already_added）。
+        """
+        cfg = self.ctx.cfg
+        index = ranking.seed_index(topic.seeds) if cfg.get("search.exclude_seeds", True) else None
+        linked: dict = {}
+        if cfg.get("search.exclude_already_added", True):
+            try:
+                linked = self.ctx.store.zotero_links()
+            except Exception:  # noqa: BLE001 - 排除失败不该影响检索
+                linked = {}
+        if not index and not linked:
+            return papers, 0
+        kept: list[Paper] = []
+        for paper in papers:
+            if index and ranking.is_seed_paper(paper, index):
+                continue
+            if linked and paper.key in linked:
+                continue
+            kept.append(paper)
+        return kept, len(papers) - len(kept)
 
     def _canonicalize(self, papers: list[Paper]) -> None:
         """把本轮结果对齐到本地库里已存在的记录上（按归一化标题判定同一篇论文）。

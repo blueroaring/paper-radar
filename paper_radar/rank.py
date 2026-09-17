@@ -168,6 +168,54 @@ def penalty_keywords(paper: Paper, negative: list[str]) -> float:
 
 
 # --------------------------------------------------------------------------- #
+# 已知论文的排除（种子论文 / 已入库）
+# --------------------------------------------------------------------------- #
+
+_DOI_RE = re.compile(r"10\.\d{4,9}/[^\s\"<>]+", re.I)
+# arXiv ID 形如 YYMM.NNNNN，年月必须合法。
+# 加这两道约束是因为 DOI 里的数字串会被误判成 arXiv ID：
+#   10.1145/3689031.3717495  →  曾错误匹配出 "9031.37174"（月份 31 不存在）
+_ARXIV_RE = re.compile(r"(?<![\d.])(\d{2}(?:0[1-9]|1[0-2])\.\d{4,5})(?:v\d+)?(?![\d.])", re.I)
+
+
+def seed_index(seeds) -> dict[str, set[str]]:
+    """把方向的种子论文归一化成可比较的标识集合（DOI / arXiv ID / 归一化标题）。
+
+    为什么需要：用户给的种子论文正是他**已经知道**的工作。数据源每轮都可能再抓到它，
+    不排除的话就会被当成"新论文"反复推荐、甚至发进简报（线上真实故障）。
+    """
+    index: dict[str, set[str]] = {"doi": set(), "arxiv": set(), "title": set()}
+    for seed in seeds or []:
+        doi = getattr(seed, "doi", "") or ""
+        arxiv_id = getattr(seed, "arxiv_id", "") or ""
+        title = getattr(seed, "title", "") or ""
+        value = getattr(seed, "value", "") or ""
+        blob = " ".join(filter(None, [doi, arxiv_id, title, value]))
+        for match in _DOI_RE.findall(blob):
+            index["doi"].add(match.rstrip(".").lower())
+        for match in _ARXIV_RE.findall(blob):
+            index["arxiv"].add(match.lower())
+        norm = normalize_title(title)
+        if not norm and value and not _DOI_RE.search(value) and not _ARXIV_RE.fullmatch(value.strip()):
+            norm = normalize_title(value)
+        # 至少三个词才当标题，避免把 DOI 串之类误当标题
+        if len(norm.split()) >= 3:
+            index["title"].add(norm)
+    return index
+
+
+def is_seed_paper(paper: Paper, index: dict[str, set[str]]) -> bool:
+    doi = (paper.doi or "").strip().lower()
+    if doi and doi in index["doi"]:
+        return True
+    arxiv_id = re.sub(r"v\d+$", "", (paper.arxiv_id or "").strip().lower())
+    if arxiv_id and arxiv_id in index["arxiv"]:
+        return True
+    norm = normalize_title(paper.title)
+    return bool(norm) and norm in index["title"]
+
+
+# --------------------------------------------------------------------------- #
 # 主排序
 # --------------------------------------------------------------------------- #
 
