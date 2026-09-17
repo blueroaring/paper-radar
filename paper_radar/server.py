@@ -408,6 +408,16 @@ class Handler(BaseHTTPRequestHandler):
                 topic.keywords = [str(k) for k in body["keywords"] if str(k).strip()]
             if body.get("seeds"):
                 topic = default_topic_from_payload({**topic.to_dict(), "seeds": body["seeds"]})
+            # 脉络起点可以在检索时临时覆盖（UI 上直接填），并**持久化到该方向**，
+            # 这样下次打开页面还在（起点属于方向级配置，不该每次重填）
+            if body.get("lineage_origins") is not None:
+                origins = [str(x).strip() for x in (body.get("lineage_origins") or []) if str(x).strip()]
+                topic.filters = {**(topic.filters or {}), "lineage_origins": origins}
+                if topic.id:
+                    stored = ctx.store.get_topic(topic.id)
+                    if stored:
+                        stored.filters = {**(stored.filters or {}), "lineage_origins": origins}
+                        ctx.store.save_topic(stored)
 
             def _run_search(job):
                 if body.get("rebuild") or not topic.queries:
@@ -419,6 +429,7 @@ class Handler(BaseHTTPRequestHandler):
                     sources=body.get("sources"),
                     summarize=bool(body.get("summarize", True)),
                     record=body.get("record", True),
+                    mode=str(body.get("mode") or "relevance"),
                     progress=job.log,
                 )
 

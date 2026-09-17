@@ -265,6 +265,49 @@ class LLMClient:
         return cards
 
     # ------------------------------------------------------------------ #
+    def propose_origins(
+        self, *, direction: str, keywords: list[str], max_origins: int = 4
+    ) -> dict:
+        """让模型指出这个方向的**奠基性工作**（脉络模式的起点）。
+
+        返回 {"origins": [{title, authors, year, why}], "start_year": int|None, "provider": str}。
+        模型可能记错标题/年份，所以调用方**必须**用学术库校验（engine.find_origins 会做）。
+        """
+        result = self.complete(
+            "origin_system",
+            "origin_user",
+            "profile",  # 与方向画像同一类开销，共用 enabled_for.profile 开关
+            direction=direction or "（未指定）",
+            keywords=", ".join(keywords or []) or "（未指定）",
+            max_origins=max_origins,
+        )
+        out: dict = {"origins": [], "start_year": None, "provider": result.provider, "error": result.error}
+        if isinstance(result.data, dict):
+            for raw in result.data.get("origins") or []:
+                title = str(raw.get("title") or "").strip()
+                if not title:
+                    continue
+                year = raw.get("year")
+                try:
+                    year = int(year) if year is not None else None
+                except (TypeError, ValueError):
+                    year = None
+                out["origins"].append(
+                    {
+                        "title": title,
+                        "authors": str(raw.get("authors") or "").strip(),
+                        "year": year,
+                        "why": str(raw.get("why") or "").strip(),
+                    }
+                )
+            start = result.data.get("start_year")
+            try:
+                out["start_year"] = int(start) if start is not None else None
+            except (TypeError, ValueError):
+                out["start_year"] = None
+        return out
+
+    # ------------------------------------------------------------------ #
     def score_relevance(self, papers: list, *, direction: str, keywords: list[str]) -> dict[str, float]:
         """让 LLM 给候选打 0~1 的相关性分（用于每日简报的最终精选，压制"关键词蹭到"的噪声）。
 

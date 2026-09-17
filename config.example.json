@@ -103,6 +103,19 @@
     "rerank": true,
     "exclude_seeds": true,
     "exclude_already_added": true,
+    "lineage": {
+      "_comment": "脉络模式：手动检索时先找出该领域的奠基工作（如交换机 BM 的 DT），再按年份从早到晚展开。只影响手动检索，不影响每日简报。",
+      "enabled": true,
+      "max_origins": 4,
+      "verify_origins": true,
+      "origin_min_keyword_hits": 2,
+      "manual_origin_similarity": 0.8,
+      "origin_similarity": 0.8,
+      "max_span_years": 40,
+      "min_relevance": 0.25,
+      "per_era": 8,
+      "include_origin_neighborhood": true
+    },
     "tier_score": { "S": 1.0, "A": 0.75, "B": 0.5, "unknown": 0.2 },
     "venue_tiers": {
       "S": [
@@ -173,7 +186,9 @@
     "summary_system": "你是一位计算机领域的论文导读专家，为研究者撰写中文速读卡片。语言凝练、信息密度高，不写空话。只输出 JSON。",
     "summary_user": "研究者当前关注的方向：\n{direction}\n关键词：{keywords}\n\n请为下面 {count} 篇论文各生成一张卡片：\n{papers}\n\n每篇需要：\n- summary：内容概要，2-3 句，说清它解决什么问题、怎么做、效果如何（不要复述标题）；\n- highlights：文章特色，2-3 条短语，指出真正的创新点或与已有工作的差异；\n- reason：推荐理由，1-2 句，明确说明它与上述方向的关系（若关系弱，直接说关系弱，不要硬夸）。\n\n严格按此 JSON 结构输出（id 必须与输入的 id 一一对应）：\n{{\"cards\": [{{\"id\": 1, \"summary\": \"...\", \"highlights\": [\"...\"], \"reason\": \"...\"}}]}}",
     "relevance_system": "你是论文相关性评审。只输出 JSON。",
-    "relevance_user": "研究方向：{direction}\n关键词：{keywords}\n\n给下列每篇论文打 0-10 的相关性分（10=同一子方向的直接竞争工作，0=完全无关）：\n{papers}\n\n输出：{{\"scores\": [{{\"id\": 1, \"score\": 8.5}}]}}"
+    "relevance_user": "研究方向：{direction}\n关键词：{keywords}\n\n给下列每篇论文打 0-10 的相关性分（10=同一子方向的直接竞争工作，0=完全无关）：\n{papers}\n\n输出：{{\"scores\": [{{\"id\": 1, \"score\": 8.5}}]}}",
+    "origin_system": "你是计算机领域的学术史研究者，熟悉各个子方向的奠基性工作。只输出 JSON，不要解释。",
+    "origin_user": "研究方向：{direction}\n该方向的核心关键词：{keywords}\n\n请指出这个方向**最早的奠基性工作**（最多 {max_origins} 篇）。判定标准（务必严格）：\n- 它必须研究**上述关键词所指的那个机制/问题本身**。同处一个场景但研究别的问题的早期论文**不要列**（例如做交换机缓冲管理时，TCP 拥塞控制、路由协议、光模块功耗这类虽然同期同场景，但属于别的子方向，一律不算）；\n- 是学术论文，不是综述、教程或最新进展；\n- 给出**真实存在、可被检索到**的准确英文标题、第一作者、发表年份；宁可少列，也不要猜；\n- 同一时期有多篇并列奠基就都列出；按年份从早到晚排序。\n\n每篇的 why 要写明「它奠基了哪个机制」（例如「首次提出按队列占用动态调整共享缓存阈值」）。\n再给出该方向大致起始年份 start_year（整数；拿不准就 null）。\n\n严格按此 JSON 输出：\n{{\"origins\": [{{\"title\": \"...\", \"authors\": \"...\", \"year\": 1998, \"why\": \"...\"}}], \"start_year\": 1998}}"
   },
 
   "zotero": {

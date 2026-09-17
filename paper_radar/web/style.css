@@ -153,6 +153,7 @@ pre.log {
 .pill.ok { color: var(--ok); border-color: #a7e0d4; }
 .pill.off { color: var(--muted); }
 .pill.star { color: #92400e; background: #fef3c7; border-color: #fcd34d; font-weight: 600; }
+.pill.origin { color: #6d28d9; background: #ede9fe; border-color: #c4b5fd; font-weight: 600; }
 td.small { font-size: 12px; }
 .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .row > * { flex: 0 0 auto; }

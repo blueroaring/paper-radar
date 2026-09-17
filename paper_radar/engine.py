@@ -151,7 +151,7 @@ class Engine:
         del source
         return None
 
-    def _paper_by_title(self, title: str) -> Paper | None:
+    def _paper_by_title(self, title: str, threshold: float | None = None) -> Paper | None:
         """按标题解析种子论文。
 
         关键：学术库（尤其 OpenAlex）对标题查询是**模糊匹配**，会返回不相关的结果，
@@ -160,7 +160,8 @@ class Engine:
         title = (title or "").strip()
         if not title:
             return None
-        threshold = float(self.ctx.cfg.get("profile.seed_title_similarity", 0.72))
+        if threshold is None:
+            threshold = float(self.ctx.cfg.get("profile.seed_title_similarity", 0.72))
 
         # ① OpenAlex 标题检索，取前 5 挑最像的
         try:
@@ -457,10 +458,24 @@ class Engine:
     ) -> dict[str, Any]:
         cfg = self.ctx.cfg
         limit = int(kwargs.get("limit") or cfg.get("search.top_n", 15))
+        mode = str(kwargs.pop("mode", "relevance") or "relevance")
+        lineage: list[Paper] = []
+        origins: list[Paper] = []
+        start_year: int | None = None
+
+        if mode == "lineage" and cfg.get("search.lineage.enabled", True):
+            # 脉络模式：先找出奠基工作，把检索窗口向前推到它那个年代
+            origins = self.find_origins(topic, progress=progress)
+            start_year = self._lineage_start_year(origins, topic)
+            if start_year:
+                kwargs["year_from"] = min(int(kwargs.get("year_from") or 9999), start_year)
+            progress(f"脉络模式：起点 {start_year or '未知'}，奠基工作 {len(origins)} 篇")
+
         rerank = (
             summarize
             and bool(cfg.get("search.rerank", True))
             and self.ctx.llm.enabled_for("relevance")
+            and mode != "lineage"  # 脉络模式按年份排序，语义重排只用于筛掉跑题项
         )
         if rerank:
             # 多取一倍候选，让语义重排有机会把真正相关但规则分偏低的论文提上来
@@ -468,7 +483,9 @@ class Engine:
 
         collected = self.collect(topic, progress=progress, **kwargs)
         ranked: list[Paper] = collected["papers"]
-        if rerank:
+        if mode == "lineage":
+            ranked = self.build_timeline(topic, ranked, origins, limit=limit, progress=progress)
+        elif rerank:
             ranked = self.rerank_with_llm(topic, ranked, progress=progress)[:limit]
         self.ctx.store.upsert_papers(ranked)
 
@@ -501,7 +518,185 @@ class Engine:
             "reranked": rerank,
             "remembered": remembered,
             "remember_threshold": threshold,
+            "mode": mode,
+            "start_year": start_year,
+            "origins": [
+                {
+                    "key": o.key,
+                    "title": o.title,
+                    "year": o.year,
+                    "venue": o.venue,
+                    "citations": o.citations,
+                    "why": o.extra.get("origin_why", ""),
+                }
+                for o in origins
+            ],
         }
+
+    # ================================================================== #
+    # 脉络模式：从奠基工作沿年份往下
+    # ================================================================== #
+    def find_origins(self, topic: Topic, *, progress: Progress = _noop) -> list[Paper]:
+        """找出该领域的奠基工作。
+
+        三条来源，优先级从高到低：
+          1. **用户在方向里手填的**（`topic.filters.lineage_origins`）—— 用户比模型更清楚
+             自己领域的始祖是哪篇（例如"交换机 BM 的始祖是 DT"），这条最可靠；
+          2. 模型提名 → **学术库校验存在性** → **切题校验**；
+          3. 都没有就返回空，脉络模式退化为"按年份铺开已有结果"。
+
+        为什么两道校验都要：模型给的第二/三条常常是编的（实测作者写成
+        `R. R. C. B. S. et al.`）；而只校验存在性又会放过"真实但跑题"的论文
+        （实测把 TCP over ATM 的拥塞控制论文当成了共享缓冲管理的奠基工作）。
+        """
+        cfg = self.ctx.cfg
+        lin = cfg.get("search.lineage", {}) or {}
+        if not lin.get("enabled", True):
+            return []
+
+        threshold = float(lin.get("origin_similarity", 0.8) or 0.8)
+        verify = bool(lin.get("verify_origins", True))
+        min_hits = int(lin.get("origin_min_keyword_hits", 2) or 0)
+
+        manual = [str(x).strip() for x in (topic.filters.get("lineage_origins") or []) if str(x).strip()]
+        if manual:
+            progress(f"使用你在方向里指定的脉络起点（{len(manual)} 条），不再让模型猜")
+            found: list[Paper] = []
+            for title in manual:
+                paper = self._paper_by_title(
+                    title,
+                    # 人工指定的标题同样要过闸门：阈值放太松会把"另一篇"匹进来
+                    # （实测 0.6 时 "Buffer Management in a Packet Switch with Shared Memory"
+                    #   匹到了另一篇 2000 年的论文），所以默认与自动提名同严。
+                    threshold=float(lin.get("manual_origin_similarity", 0.8) or 0.8),
+                )
+                if paper is None:
+                    progress(f"指定的起点没能在学术库里对上：{title[:56]}")
+                    continue
+                paper.extra["is_origin"] = True
+                paper.extra["origin_why"] = "由用户指定"
+                paper.extra["origin_source"] = "manual"
+                found.append(paper)
+                progress(f"起点（人工指定）：{paper.year or '?'} {paper.title[:56]}")
+            if found:
+                return found
+            progress("指定条目全部未匹配，回退到让模型提名")
+
+        if not self.ctx.llm.enabled_for("profile"):
+            progress("脉络模式需要大模型提名奠基工作，但 llm.enabled_for.profile 已关闭")
+            return []
+
+        proposal = self.ctx.llm.propose_origins(
+            direction=topic.direction or topic.name,
+            keywords=topic.keywords,
+            max_origins=int(lin.get("max_origins", 4) or 4),
+        )
+        if proposal.get("error"):
+            progress(f"奠基工作提名失败：{proposal['error']}")
+
+        found = []
+        seen: set[str] = set()
+        for cand in proposal.get("origins") or []:
+            if verify:
+                paper = self._paper_by_title(cand["title"], threshold=threshold)
+                if paper is None:
+                    progress(f"奠基工作未通过存在性校验（可能是模型记错）：{cand['title'][:56]}")
+                    continue
+                hits, _raw = ranking.match_keywords(paper, topic.keywords)
+                # 只看标题/摘要命中方向关键词的条数：跑题的早期工作通常一个都命中不了
+                if min_hits and len(hits) < min_hits:
+                    progress(
+                        f"奠基工作未通过切题校验（只命中 {len(hits)} 个方向关键词）："
+                        f"{paper.title[:52]}"
+                    )
+                    continue
+            else:
+                paper = Paper(title=cand["title"], year=cand.get("year"), source="llm", sources=["llm"])
+            if paper.key in seen:
+                continue
+            seen.add(paper.key)
+            paper.extra["is_origin"] = True
+            paper.extra["origin_why"] = cand.get("why", "")
+            paper.extra["origin_claimed_year"] = cand.get("year")
+            paper.extra["origin_title"] = cand["title"]
+            paper.extra["origin_source"] = "llm"
+            found.append(paper)
+            progress(f"奠基工作（已校验）：{paper.year or '?'} {paper.title[:56]}")
+        return found
+
+    def _lineage_start_year(self, origins: list[Paper], topic: Topic) -> int | None:
+        """脉络起点：奠基工作的最早年份；找不到就用配置的回溯跨度兜底。"""
+        lin = self.ctx.cfg.get("search.lineage", {}) or {}
+        years = [o.year for o in origins if o.year]
+        if years:
+            return min(years)
+        span = int(lin.get("max_span_years", 40) or 40)
+        return datetime.now(timezone.utc).year - span
+
+    def build_timeline(
+        self,
+        topic: Topic,
+        papers: list[Paper],
+        origins: list[Paper],
+        *,
+        limit: int,
+        progress: Progress = _noop,
+    ) -> list[Paper]:
+        """把候选排成一条**从早到晚**的脉络。
+
+        选取逻辑不是"按分数取前 N"（那样会被近几年淹没），而是**按年代分桶、每桶取最相关的若干篇**，
+        再把奠基工作钉在最前面 —— 用户要看到的是"这个领域怎么一步步走到今天"。
+        """
+        lin = self.ctx.cfg.get("search.lineage", {}) or {}
+        min_relevance = float(lin.get("min_relevance", 0.12) or 0.0)
+        per_era_cap = int(lin.get("per_era", 8) or 8)
+
+        # ① 合并候选：抓取结果 + 奠基工作（它们可能没被本轮检索命中）
+        merged: dict[str, Paper] = {}
+        for paper in list(papers) + list(origins):
+            if not paper.title:
+                continue
+            existing = merged.get(paper.key)
+            if existing:
+                existing.merge(paper)
+                if paper.extra.get("is_origin"):
+                    existing.extra["is_origin"] = True
+                    existing.extra["origin_why"] = paper.extra.get("origin_why", "")
+            else:
+                merged[paper.key] = paper
+        pool = list(merged.values())
+
+        # ② 相关度门槛：脉络里不该混进跑题的老论文（用规则相关度，不额外调模型）
+        for paper in pool:
+            paper.extra.setdefault("relevance_part", round(paper.score_parts.get("relevance", 0.0), 4))
+        on_topic = [p for p in pool if p.extra["relevance_part"] >= min_relevance or p.extra.get("is_origin")]
+        if not on_topic:
+            on_topic = pool
+
+        # ③ 按十年分桶，每桶按相关度取前 per_era 篇；总预算超出时按桶数缩减配额，
+        #    保证每个年代都有代表，而不是被最近的论文挤满。
+        buckets: dict[int, list[Paper]] = {}
+        for paper in on_topic:
+            buckets.setdefault((paper.year or 0) // 10 * 10, []).append(paper)
+        era_count = max(1, len(buckets))
+        quota = max(1, min(per_era_cap, limit // era_count)) if limit else per_era_cap
+
+        chosen: dict[str, Paper] = {}
+        for _era, group in buckets.items():
+            group.sort(key=lambda p: (-p.score_parts.get("relevance", 0.0), -(p.citations or 0)))
+            for paper in group[:quota]:
+                chosen[paper.key] = paper
+        # 奠基工作必须留在脉络里（哪怕它落在配额之外）
+        for origin in origins:
+            chosen.setdefault(origin.key, origin)
+
+        timeline = sorted(chosen.values(), key=lambda p: (p.year or 9999, -p.score_parts.get("relevance", 0.0)))
+        decades = sorted({(p.year or 0) // 10 * 10 for p in timeline})
+        progress(
+            f"脉络：{len(timeline)} 篇，跨 {decades[0]}s–{decades[-1]}s"
+            f"（相关度门槛 {min_relevance}，每代配额 {quota}）"
+        )
+        return timeline
 
     # ================================================================== #
     # 高分记忆

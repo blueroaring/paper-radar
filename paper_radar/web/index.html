@@ -98,11 +98,24 @@
           <label>数据源（点击切换）</label>
           <div class="chips" id="r-sources"></div>
         </div>
+        <div>
+          <label for="r-mode">排序方式</label>
+          <select id="r-mode">
+            <option value="relevance">相关度优先（默认）</option>
+            <option value="lineage">脉络视角（从奠基工作按年份往下）</option>
+          </select>
+        </div>
       </div>
       <label class="row small" style="margin-top:12px">
         <input type="checkbox" id="r-summarize" checked style="width:auto">
         用大模型写「内容概要 / 文章特色 / 推荐理由」（关闭则用启发式模板）
       </label>
+      <div id="lineage-box" style="display:none">
+        <label for="r-origins">脉络起点（可选，每行一条；留空则由 AI 判断本领域的奠基工作）</label>
+        <textarea id="r-origins" style="min-height:56px"
+          placeholder="例如：Dynamic Queue Length Thresholds for Shared-Memory Packet Switches&#10;（交换机 BM 的始祖是 DT，直接填标题最可靠）"></textarea>
+        <div class="muted small">AI 提名的奠基工作会经学术库校验（存在性 + 是否切题）；你手填的优先级最高。</div>
+      </div>
       <div>
         <button class="act primary" id="btn-search">开始检索</button>
         <button class="act" id="btn-rebuild">重建检索式后检索</button>
@@ -113,8 +126,8 @@
     </div>
 
     <div class="card">
-      <h2>推荐表</h2>
-      <p class="hint">勾选想要的论文 → 选择 Zotero 分类 → 一键入库（自动按 DOI/标题查重）。</p>
+      <h2 id="results-title">推荐表</h2>
+      <p class="hint" id="results-hint">勾选想要的论文 → 选择 Zotero 分类 → 一键入库（自动按 DOI/标题查重）。</p>
       <div class="row" style="margin-bottom:12px">
         <button class="act" id="btn-all">全选</button>
         <button class="act" id="btn-none">清空</button>

@@ -849,6 +849,164 @@ class TestStaticRoutes(unittest.TestCase):
         self.assertIsNone(resolve_static_target(cfg, "/..%2f..%2fsecret.txt"))
 
 
+class TestLineageMode(unittest.TestCase):
+    """脉络模式：从奠基工作出发、按年份往下，而不是被近几年淹没。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Store(Path(self.tmp.name) / "l.db")
+        self.topic = Topic(name="交换机BM", keywords=["buffer", "switch", "threshold"])
+        self.topic.id = self.store.save_topic(self.topic)
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def _paper(self, year, title, relevance=0.6, citations=0, origin=False):
+        p = Paper(
+            title=title,
+            doi=f"10.1/{title}",
+            year=year,
+            citations=citations,
+            source="t",
+            sources=["t"],
+        )
+        p.score_parts = {"relevance": relevance}
+        p.score = relevance
+        if origin:
+            p.extra["is_origin"] = True
+        return p
+
+    def _engine(self):
+        from paper_radar.engine import Context, Engine
+
+        cfg = Config.load()
+        cfg.set("app.data_dir", self.tmp.name)
+        ctx = Context(cfg)
+        return ctx, Engine(ctx)
+
+    def test_timeline_is_chronological_and_pins_origin(self):
+        ctx, engine = self._engine()
+        try:
+            origin = self._paper(1998, "Dynamic Queue Length Thresholds", relevance=0.1, origin=True)
+            papers = [
+                self._paper(2025, "Recent Work A", relevance=0.9),
+                self._paper(2005, "Old Work B", relevance=0.5),
+                self._paper(2015, "Mid Work C", relevance=0.7),
+            ]
+            timeline = engine.build_timeline(self.topic, papers, [origin], limit=10)
+            years = [p.year for p in timeline]
+            self.assertEqual(years, sorted(years), "必须按年份升序")
+            self.assertEqual(years[0], 1998, "奠基工作钉在最前面")
+            self.assertTrue(timeline[0].extra.get("is_origin"))
+        finally:
+            ctx.store.close()
+
+    def test_timeline_balances_years_instead_of_taking_newest(self):
+        """每代都取代表：只有近几年高分时，老年代的代表也不该被挤掉。"""
+        ctx, engine = self._engine()
+        try:
+            papers = [
+                self._paper(1999, "Very Old", relevance=0.30),
+                self._paper(2005, "Old", relevance=0.35),
+                self._paper(2015, "Mid", relevance=0.40),
+                # 近几年一堆高分
+                *[self._paper(2023 + i % 3, f"Recent {i}", relevance=0.95) for i in range(6)],
+            ]
+            timeline = engine.build_timeline(self.topic, papers, [], limit=8)
+            decades = {p.year // 10 * 10 for p in timeline}
+            self.assertIn(1990, decades, "1990s 不该被近几年挤掉")
+            self.assertIn(2000, decades)
+            self.assertIn(2010, decades)
+            self.assertLessEqual(len(timeline), 8)
+        finally:
+            ctx.store.close()
+
+    def test_timeline_filters_off_topic(self):
+        ctx, engine = self._engine()
+        try:
+            papers = [
+                self._paper(2000, "On Topic Old", relevance=0.6),
+                self._paper(2001, "Off Topic Old", relevance=0.02),
+            ]
+            timeline = engine.build_timeline(self.topic, papers, [], limit=10)
+            self.assertEqual([p.title for p in timeline], ["On Topic Old"])
+        finally:
+            ctx.store.close()
+
+    def test_manual_origins_take_priority_and_skip_llm(self):
+        """用户手填的起点优先，且不该再去问模型。"""
+        ctx, engine = self._engine()
+        try:
+            self.topic.filters = {"lineage_origins": ["Dynamic Queue Length Thresholds"]}
+            resolved = Paper(title="Dynamic Queue Length Thresholds", doi="10.1/dt", year=1998)
+            engine._paper_by_title = lambda title, threshold=None: resolved  # type: ignore[assignment]
+            called = {"llm": 0}
+
+            def boom(**kwargs):
+                called["llm"] += 1
+                return {"origins": []}
+
+            ctx.llm.propose_origins = boom  # type: ignore[assignment]
+            origins = engine.find_origins(self.topic)
+            self.assertEqual([o.title for o in origins], ["Dynamic Queue Length Thresholds"])
+            self.assertEqual(called["llm"], 0, "手填起点时不应调用模型")
+            self.assertEqual(origins[0].extra["origin_source"], "manual")
+        finally:
+            ctx.store.close()
+
+    def test_llm_origin_must_pass_topicality_gate(self):
+        """模型提名要过两道闸门：存在性 + 切题（实测把 TCP/ATM 拥塞控制当成了共享缓冲管理的奠基）。"""
+        ctx, engine = self._engine()
+        try:
+            resolved = Paper(
+                title="Dynamics of TCP traffic over ATM networks",
+                doi="10.1/tcp",
+                year=1995,
+                abstract="TCP congestion control over ATM networks.",
+            )
+            engine._paper_by_title = lambda title, threshold=None: resolved  # type: ignore[assignment]
+            ctx.llm.propose_origins = lambda **kwargs: {  # type: ignore[assignment]
+                "origins": [{"title": resolved.title, "year": 1995, "why": "x"}],
+                "start_year": 1995,
+            }
+            self.topic.keywords = ["buffer management", "dynamic threshold", "shared buffer"]
+            self.assertEqual(engine.find_origins(self.topic), [], "跑题的奠基工作必须被挡掉")
+
+            # 切题的则保留
+            ctx.llm.propose_origins = lambda **kwargs: {  # type: ignore[assignment]
+                "origins": [
+                    {
+                        "title": "Dynamic Queue Length Thresholds for Shared-Memory Packet Switches",
+                        "year": 1998,
+                        "why": "首次提出动态阈值",
+                    }
+                ],
+                "start_year": 1998,
+            }
+            engine._paper_by_title = lambda title, threshold=None: Paper(  # type: ignore[assignment]
+                title="Dynamic queue length thresholds for shared-memory packet switches",
+                doi="10.1/dt",
+                year=1998,
+                abstract="We propose a dynamic threshold scheme for shared buffer switches.",
+            )
+            kept = engine.find_origins(self.topic)
+            self.assertEqual(len(kept), 1)
+            self.assertTrue(kept[0].extra["is_origin"])
+        finally:
+            ctx.store.close()
+
+    def test_recommendation_to_dict_falls_back_to_paper_score(self):
+        """不生成卡片的路径只构造 Recommendation(paper=p)，分数不能因此变成 0。"""
+        paper = Paper(title="T", year=2020)
+        paper.score = 0.73
+        paper.score_parts = {"relevance": 0.67}
+        rec = Recommendation(paper=paper)  # score 留空
+        d = rec.to_dict()
+        self.assertAlmostEqual(d["score"], 0.73)
+        self.assertAlmostEqual(d["score_parts"]["relevance"], 0.67)
+
+
 class TestTitleSimilarity(unittest.TestCase):
     def test_gate_rejects_unrelated_fuzzy_match(self):
         original = "Themis: Scheduling-Aware Buffer Management for HBM-Based Hybrid Buffers"

@@ -27,20 +27,30 @@ from .store import now_iso
 from .textutil import truncate
 
 
-def _print_table(papers: list) -> None:
+def _print_table(papers: list, *, mode: str = "relevance") -> None:
     if not papers:
         print("（没有结果）")
         return
     for idx, p in enumerate(papers, start=1):
         data = p if isinstance(p, dict) else p.to_dict()
-        print(f"\n{idx}. {data.get('title')}")
+        extra = data.get("extra") or {}
+        badge = " ★奠基" if extra.get("is_origin") else ""
+        print(f"\n{idx}. {data.get('title')}{badge}")
         meta = [str(data.get("year") or "年份未知"), data.get("venue") or "发表处未标注"]
         if data.get("citations") is not None:
             meta.append(f"被引 {data['citations']}")
-        score = data.get("score")
-        if score is not None:
-            meta.append(f"相关度 {round(float(score) * 100)}")
+        # 脉络模式看**相关度**：总分被时效权重拖累，老论文会被压成接近 0，读起来误导
+        if mode == "lineage":
+            rel = (data.get("score_parts") or {}).get("relevance")
+            if rel is not None:
+                meta.append(f"相关度 {round(float(rel) * 100)}")
+        else:
+            score = data.get("score")
+            if score is not None:
+                meta.append(f"相关度 {round(float(score) * 100)}")
         print("   " + " · ".join(meta))
+        if extra.get("is_origin") and extra.get("origin_why"):
+            print("   奠基: " + truncate(str(extra["origin_why"]), 160))
         if data.get("summary"):
             print("   概要: " + truncate(data["summary"], 200))
         for h in data.get("highlights") or []:
@@ -86,6 +96,17 @@ def main(argv: list[str] | None = None) -> int:
     p_search.add_argument("--limit", type=int, default=None)
     p_search.add_argument("--source", action="append", default=[])
     p_search.add_argument("--no-llm", action="store_true")
+    p_search.add_argument(
+        "--lineage",
+        action="store_true",
+        help="脉络视角：先定该领域的奠基工作，再按年份从早到晚",
+    )
+    p_search.add_argument(
+        "--origin",
+        action="append",
+        default=[],
+        help="脉络起点（可重复；标题即可），不填则由 AI 判断",
+    )
     p_search.add_argument("--json", action="store_true")
 
     p_digest = sub.add_parser("digest", help="立即执行一次每日简报")
@@ -203,10 +224,14 @@ def main(argv: list[str] | None = None) -> int:
             )
             if not topic.queries:
                 engine.build_profile(topic, progress=lambda m: print(" · " + m))
+        if args.origin:
+            # 命令行指定的起点优先于方向里配置的
+            topic.filters = {**(topic.filters or {}), "lineage_origins": list(args.origin)}
         result = engine.search(
             topic,
             limit=args.limit,
             sources=args.source or None,
+            mode="lineage" if args.lineage else "relevance",
             summarize=not args.no_llm,
             record=False,
             progress=lambda m: print(" · " + m),
@@ -214,7 +239,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             print(json.dumps(result, ensure_ascii=False, indent=2))
         else:
-            _print_table(result["papers"])
+            if result.get("mode") == "lineage":
+                print(f"\n脉络视角：起点 {result.get('start_year') or '未知'}，"
+                      f"奠基工作 {len(result.get('origins') or [])} 篇（按年份从早到晚）")
+            _print_table(result["papers"], mode=result.get("mode", "relevance"))
             if result.get("errors"):
                 print("\n失败的数据源：" + json.dumps(result["errors"], ensure_ascii=False))
         return 0

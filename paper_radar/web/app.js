@@ -9,6 +9,9 @@ const S = {
   topics: [],
   currentTopicId: null,
   results: [],
+  lastMode: "relevance",
+  origins: [],
+  startYear: null,
   enabledSources: new Set(),
   pickedSources: new Set(),
   digestDays: new Set(),
@@ -236,8 +239,16 @@ async function runSearch(rebuild = false) {
   const topicId = Number($("r-topic").value);
   if (!topicId) { showStatus("search-status", "先去「研究方向」建一个方向。", "err"); return; }
   const sources = Array.from(S.enabledSources);
+  const mode = $("r-mode").value;
+  const originLines = $("r-origins").value.split("\n").map((s) => s.trim()).filter(Boolean);
   $("search-log").style.display = "block";
-  showStatus("search-status", "检索中…（多源并发 + 生成卡片，通常 30 秒到 3 分钟）", "info");
+  showStatus(
+    "search-status",
+    mode === "lineage"
+      ? "检索中（脉络模式：先定起点，再按年份铺开，通常 1–4 分钟）…"
+      : "检索中…（多源并发 + 生成卡片，通常 30 秒到 3 分钟）",
+    "info"
+  );
   const data = await api("/api/search", {
     method: "POST",
     body: {
@@ -245,6 +256,8 @@ async function runSearch(rebuild = false) {
       limit: Number($("r-limit").value) || 15,
       sources,
       summarize: $("r-summarize").checked,
+      mode,
+      lineage_origins: originLines,
       rebuild,
     },
   });
@@ -253,9 +266,14 @@ async function runSearch(rebuild = false) {
     if (job.status === "error") { showStatus("search-status", "检索失败：" + job.error, "err"); return; }
     const res = job.result || {};
     S.results = res.papers || [];
+    S.lastMode = res.mode || "relevance";
+    S.origins = res.origins || [];
+    S.startYear = res.start_year;
     renderResults();
     const errs = Object.entries(res.errors || {});
-    let msg = `共候选 ${res.candidates || 0} 篇，去重排序后给出 ${S.results.length} 篇推荐。`;
+    let msg = S.lastMode === "lineage"
+      ? `脉络视角：起点 ${res.start_year || "未知"}，奠基工作 ${(res.origins || []).length} 篇，按年份给出 ${S.results.length} 篇。`
+      : `共候选 ${res.candidates || 0} 篇，去重排序后给出 ${S.results.length} 篇推荐。`;
     if (errs.length) msg += " 失败的数据源：" + errs.map(([k, v]) => `${k}(${v})`).join("；");
     showStatus("search-status", msg, errs.length ? "info" : "ok");
     refresh();
@@ -264,33 +282,52 @@ async function runSearch(rebuild = false) {
 
 function renderResults() {
   const body = $("results-body");
+  const lineage = S.lastMode === "lineage";
+  $("results-title").textContent = lineage ? "脉络（从奠基工作往下）" : "推荐表";
+  $("results-hint").textContent = lineage
+    ? `按年份从早到晚，每个年代取该代最相关的若干篇；标 ★奠基 的是起点（${(S.origins || []).length} 篇，起点年份 ${S.startYear || "未知"}）。`
+    : "勾选想要的论文 → 选择 Zotero 分类 → 一键入库（自动按 DOI/标题查重）。";
   if (!S.results.length) {
-    body.innerHTML = '<tr><td colspan="7" class="muted">没有结果。换个关键词或降低年份限制试试。</td></tr>';
+    body.innerHTML = `<tr><td colspan="7" class="muted">没有结果。换个关键词或降低年份限制试试。</td></tr>`;
     return;
   }
-  body.innerHTML = S.results
-    .map((p, idx) => {
-      const link = p.url || (p.doi ? "https://doi.org/" + p.doi : (p.arxiv_id ? "https://arxiv.org/abs/" + p.arxiv_id : ""));
-      const title = link ? `<a href="${esc(link)}" target="_blank" rel="noreferrer">${esc(p.title)}</a>` : esc(p.title);
-      const meta = [
-        p.year || "年份未知",
-        p.citations != null ? "被引 " + p.citations : null,
-        (p.sources || []).slice(0, 3).join("/"),
-      ].filter(Boolean).join(" · ");
-      const tier = p.extra && p.extra.venue_tier && p.extra.venue_tier !== "unknown" ? ` <span class="pill">${esc(p.extra.venue_tier)}</span>` : "";
-      const star = p.remembered ? ' <span class="pill star">★ 高分记忆</span>' : "";
-      const hl = (p.highlights || []).map((h) => `<li>${esc(h)}</li>`).join("");
-      return `<tr>
+  let lastDecade = null;
+  const rows = [];
+  S.results.forEach((p, idx) => {
+    // 脉络模式：年代变化时插一行分隔，让"沿年份往下"一眼可见
+    if (lineage && p.year) {
+      const decade = Math.floor(p.year / 10) * 10;
+      if (decade !== lastDecade) {
+        lastDecade = decade;
+        rows.push(
+          `<tr><td colspan="7" style="background:#f8fafc;color:#64748b;font-size:12px;font-weight:600;padding:6px 10px;">${decade}s</td></tr>`
+        );
+      }
+    }
+    const link = p.url || (p.doi ? "https://doi.org/" + p.doi : (p.arxiv_id ? "https://arxiv.org/abs/" + p.arxiv_id : ""));
+    const title = link ? `<a href="${esc(link)}" target="_blank" rel="noreferrer">${esc(p.title)}</a>` : esc(p.title);
+    const meta = [
+      p.year || "年份未知",
+      p.citations != null ? "被引 " + p.citations : null,
+      (p.sources || []).slice(0, 3).join("/"),
+    ].filter(Boolean).join(" · ");
+    const tier = p.extra && p.extra.venue_tier && p.extra.venue_tier !== "unknown" ? ` <span class="pill">${esc(p.extra.venue_tier)}</span>` : "";
+    const star = p.remembered ? ' <span class="pill star">★ 高分记忆</span>' : "";
+    const origin = p.extra && p.extra.is_origin
+      ? ` <span class="pill origin" title="${esc((p.extra.origin_why) || "")}">★ 奠基</span>`
+      : "";
+    const hl = (p.highlights || []).map((h) => `<li>${esc(h)}</li>`).join("");
+    rows.push(`<tr>
         <td><input type="checkbox" class="pick" data-key="${esc(p.key)}" style="width:auto"></td>
-        <td class="title">${title}${star}<div class="mini">${esc(meta)}</div></td>
+        <td class="title">${title}${origin}${star}<div class="mini">${esc(meta)}</div></td>
         <td>${esc(p.venue || "未标注")}${tier}</td>
         <td>${esc(p.summary || "—")}</td>
         <td><ul class="hl">${hl || "<li>—</li>"}</ul></td>
         <td>${esc(p.reason || "—")}</td>
-        <td class="score">${Math.round((p.score || 0) * 100)}</td>
-      </tr>`;
-    })
-    .join("");
+        <td class="score">${Math.round((lineage ? ((p.score_parts || {}).relevance ?? p.score ?? 0) : (p.score || 0)) * 100)}</td>
+      </tr>`);
+  });
+  body.innerHTML = rows.join("");
   body.querySelectorAll(".pick").forEach((cb) => cb.addEventListener("change", updateSelCount));
   updateSelCount();
 }
@@ -745,6 +782,9 @@ $("btn-save-search").addEventListener("click", async () => {
   if (t) { document.querySelector('nav button[data-tab="results"]').click(); runSearch(false); }
 });
 $("btn-search").addEventListener("click", () => runSearch(false));
+$("r-mode").addEventListener("change", (e) => {
+  $("lineage-box").style.display = e.target.value === "lineage" ? "block" : "none";
+});
 $("btn-rebuild").addEventListener("click", () => runSearch(true));
 $("btn-all").addEventListener("click", () => { document.querySelectorAll("#results-body .pick").forEach((cb) => (cb.checked = true)); updateSelCount(); });
 $("btn-none").addEventListener("click", () => { document.querySelectorAll("#results-body .pick").forEach((cb) => (cb.checked = false)); updateSelCount(); });

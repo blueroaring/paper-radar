@@ -14,6 +14,7 @@ English: A self-hosted literature radar for CS researchers — describe your res
 | ② 多源检索 + 推荐表 | Google Scholar、arXiv、OpenAlex、Crossref（+ 可选 dblp、Semantic Scholar）并发检索 → 去重 → 加权排序 → 表格里给出**内容概要 / 文章特色 / 发表在哪里 / 推荐理由 / 相关度**，勾选后一键写入 Zotero（自动查重、归入指定分类、打标签） |
 | ③ 每日定时邮件 | 在 UI 里设定"每天几点 + 星期几 + 每次几篇"，到点自动检索最近的新论文、写概要、发邮件，同时在本机留一份 HTML 报告 |
 | ④ 高分记忆 | 相关度达到阈值的论文**自动长期记住**（跨检索、跨简报保留），可查看、写批注、导出 Markdown / BibTeX / CSV / JSON、批量入 Zotero；邮件里给达标论文打 ★ |
+| ⑤ 脉络视角 | 主动检索时可切到「从奠基工作按年份往下」：先定位该领域的**始祖**（如交换机 BM 的 DT），再沿年代铺开演进脉络，每个年代取该代最相关的若干篇 |
 
 设计上刻意做到 **可扩展、少硬编码**：
 
@@ -127,6 +128,44 @@ config.example.json   （仓库内置默认值，唯一业务参数来源）
 | **Semantic Scholar** | 可选 | 引用数、领域 | 无 key 时几乎必然 429 → **默认不启用**，填了 key 再开 |
 
 任何单个数据源失败都**只影响它自己**：推荐表照出，控制台会在结果里列出哪个源失败了。
+
+---
+
+## 脉络视角：从始祖按年份往下
+
+![脉络视角](docs/screenshot-lineage.png)
+
+按相关度排序会把**近几年的论文**顶到最上面（时效权重），但理解一个领域往往需要**先读奠基工作**。
+「检索推荐」页把「排序方式」切成 **脉络视角** 即可：
+
+1. **定起点**：优先用你手填的「脉络起点」（例如交换机 BM 的
+   `Dynamic Queue Length Thresholds for Shared-Memory Packet Switches`，也就是 DT）；
+   没填就由 AI 提名该领域的奠基工作。
+2. **两道校验**：AI 提名的每一篇都要过 **①存在性**（学术库标题相似度闸门）和
+   **②切题**（必须命中方向关键词）——模型编造的条目、以及"真实但跑题"的早期工作都会被挡掉。
+3. **按年代铺开**：检索窗口自动前推到起点那年，候选按**十年分桶、每桶取该代最相关的若干篇**，
+   再按年份升序输出。这样老年代不会被近几年挤掉，你能看到"这个领域怎么一步步走到今天"。
+4. 表格里年代自动插入分隔行，起点标 **★奠基**，鼠标悬停可看它奠基了什么。
+
+```bash
+# 命令行同样可用
+python -m paper_radar search --topic 1 --lineage --limit 12 \
+  --origin "Dynamic Queue Length Thresholds for Shared-Memory Packet Switches"
+```
+
+配置（`config.json` 的 `search.lineage`）：
+
+| 键 | 默认 | 作用 |
+|---|---|---|
+| `enabled` | `true` | 是否启用脉络模式 |
+| `max_origins` | `4` | 让 AI 最多提名几篇奠基工作 |
+| `origin_min_keyword_hits` | `2` | 提名必须命中几个方向关键词才算切题 |
+| `manual_origin_similarity` | `0.8` | 手填起点的标题相似度闸门（放太松会匹到别的论文） |
+| `min_relevance` | `0.25` | 脉络里保留的最低相关度（过滤掉年代久远的弱相关论文） |
+| `per_era` | `8` | 每个十年最多取几篇 |
+| `max_span_years` | `40` | 找不到起点时的回溯跨度 |
+
+> 起点会**存在方向里**（`topic.filters.lineage_origins`），下次打开页面还在。
 
 ---
 

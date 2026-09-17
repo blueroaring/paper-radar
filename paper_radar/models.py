@@ -215,10 +215,15 @@ class Recommendation:
 
     def to_dict(self) -> dict[str, Any]:
         d = self.paper.to_dict()
+        # 自身分数为空时回落到论文对象上的分数。
+        # 原因：不生成卡片的路径（--no-llm / summarize=false）只构造 Recommendation(paper=p)，
+        # 若不回落，这里会把论文已经算好的分数**覆盖成 0**，界面上整列相关度全是 0。
+        score = self.score if self.score else self.paper.score
+        parts = self.score_parts or self.paper.score_parts
         d.update(
             {
-                "score": round(self.score, 4),
-                "score_parts": {k: round(v, 4) for k, v in self.score_parts.items()},
+                "score": round(score, 4),
+                "score_parts": {k: round(v, 4) for k, v in (parts or {}).items()},
                 "summary": self.summary,
                 "highlights": list(self.highlights),
                 "reason": self.reason,
