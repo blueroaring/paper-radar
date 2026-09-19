@@ -627,6 +627,30 @@ class TestMailDeliveryRobustness(unittest.TestCase):
         self.store.save_recommendations(self.topic.id, recs, status="shown")
         self.assertEqual(self.store.filter_digest_pending(self.topic.id, [recs[0].paper]), [])
 
+    def test_pending_retry_does_not_depend_on_todays_candidates(self):
+        """补发队列必须独立于"今天搜到了什么"（真事故：卡了 3 天没补发）。
+
+        filter_digest_pending 只是对**今天抓回来的候选**做过滤，它不是一个队列；
+        而每日检索只回吐打分最高的前若干篇，一篇落出这个名单的 pending 论文
+        就再也不会出现在候选里 —— 有记录所以不算新，又没人再去取它，
+        于是既不会重发也不会被清理。补发必须从库里取。
+        """
+        recs = self._recs("stuck")
+        self.store.save_recommendations(self.topic.id, recs, status="pending")
+
+        # 今天这篇一篇都没抓到：按"今天候选"筛，什么都筛不出来
+        self.assertEqual(self.store.filter_digest_pending(self.topic.id, []), [])
+
+        # 但待补发队列照样取得到它
+        self.assertEqual(
+            [p.key for p in self.store.list_pending_papers(self.topic.id)],
+            [recs[0].paper.key],
+        )
+
+        # 真发出去之后就不再待补发
+        self.store.set_status(self.topic.id, recs[0].paper.key, "sent")
+        self.assertEqual(self.store.list_pending_papers(self.topic.id), [])
+
     def test_dropped_status_stops_reevaluation(self):
         """被阈值刷掉的候选标成 dropped 后，不该再进候选 —— 否则每天白评一遍。"""
         recs = self._recs("G")

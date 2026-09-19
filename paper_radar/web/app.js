@@ -401,6 +401,33 @@ async function addToZotero() {
 /* ------------------------------------------------------------------ */
 /* 每日简报                                                            */
 /* ------------------------------------------------------------------ */
+/**
+ * 一行文字说清一次运行到底做了什么。
+ * 关键是让"没收到邮件"变得可自证：是没东西可发，还是发失败了。
+ * 之前这行只显示 status（empty / ok / error），用户没法区分这两件事，
+ * 于是每天早上都要问一遍"为什么又没收到邮件"。
+ */
+function runLabel(r) {
+  const s = r.stats || {};
+  const kind = r.kind === "digest" ? "每日简报" : r.kind === "search" ? "手动检索" : esc(r.kind);
+  if (r.status === "error") return `${esc(r.started_at)} · ${kind} · <b>出错</b> ${esc(r.error || "未知原因")}`;
+  const parts = [];
+  if (s.candidates != null) parts.push(`候选 ${s.candidates} 篇`);
+  if (r.kind === "digest") {
+    const n = s.new != null ? s.new : (s.items || []).length;
+    parts.push(n ? `<b>新论文 ${n} 篇</b>` : "没有新论文（不发信）");
+    const mail = s.mail || {};
+    if (mail.ok === true) parts.push("邮件已发");
+    else if (mail.ok === false) parts.push(`<b>邮件失败</b>：${esc(mail.error || "未知")}`);
+    const errs = Object.entries(s.errors || {});
+    if (errs.length) parts.push("数据源异常：" + errs.map(([k, v]) => `${esc(k)} ${esc(String(v))}`).join("；"));
+  } else {
+    parts.push(`${(s.items || []).length} 篇`);
+  }
+  const report = r.report_path ? ` · <a href="/reports/${encodeURIComponent(r.report_path.split(/[\\/]/).pop())}" target="_blank" rel="noreferrer">报告</a>` : "";
+  return `${esc(r.started_at)} · ${kind} · ${parts.join(" · ")}${report}`;
+}
+
 function renderDigestPanel(data) {
   const d = data.digest || {};
   const sched = data.scheduler || {};
@@ -428,7 +455,7 @@ function renderDigestPanel(data) {
   });
   const runs = data.runs || [];
   $("run-list").innerHTML = runs.length
-    ? runs.map((r) => `<div>${esc(r.started_at)} · ${esc(r.kind)} · <b>${esc(r.status)}</b> ${r.error ? "· " + esc(r.error.slice(0, 120)) : ""}</div>`).join("")
+    ? runs.map((r) => `<div>${runLabel(r)}</div>`).join("")
     : '<span class="muted">暂无记录。</span>';
 }
 

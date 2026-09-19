@@ -140,19 +140,36 @@ def run_digest(
             entry["candidates"] = collected.get("candidates", 0)
 
             papers = filter_recent(papers, lookback_days=lookback_days)
+            # 补发队列：上次想发却没发出去的，必须**从库里**取，不能指望"今天又抓到它"。
+            # 每日检索只回吐打分最高的前若干篇（collect 的 limit），一篇落出这个名单的
+            # pending 论文就永远不会再出现 —— 补发机制会静默失效（真事故：卡了 3 天）。
+            retry_papers = ctx.store.list_pending_papers(topic.id) if only_new else []
+            retry_keys = {p.key for p in retry_papers}
             if only_new:
                 before = len(papers)
                 # 用 pending 过滤而不是 filter_new：手动检索看过的（shown）不再打扰，
                 # 但"上次想发却没发出去"的（pending）必须能被重新捡起来重发
                 papers = ctx.store.filter_digest_pending(topic.id, papers)
-                progress(f"[{topic.name}] 过滤已推送：{before} → {len(papers)} 篇（含上次未发出的）")
+                progress(f"[{topic.name}] 过滤已推送：{before} → {len(papers)} 篇")
+                # 检索这次没抓回来的那些，直接补在最前面；它们不受 lookback 限制 ——
+                # 已经被判定过值得发，只是邮件没出去，不是"过期"。
+                have = {p.key for p in papers}
+                missed = [p for p in retry_papers if p.key not in have]
+                if missed:
+                    progress(
+                        f"[{topic.name}] 补上次没发出去的 {len(missed)} 篇"
+                        f"（不等检索重新抓到它）"
+                    )
+                papers = missed + papers
 
             # 先语义重排（只对前若干个候选，控制成本），再按最低分阈值剔除蹭关键词的论文
             candidates = list(papers)
             papers = engine.rerank_with_llm(topic, papers[: max(top_n * 3, 10)], progress=progress)
             min_score = float(digest_cfg.get("min_score", 0.0) or 0.0)
             if min_score:
-                kept = [p for p in papers if p.score >= min_score]
+                # 补发的不参与剔除：它上次已经被判定为够相关，只是邮件没送出去。
+                # 重新打分一旦因为模型波动掉到线下，用户就永远收不到那篇了。
+                kept = [p for p in papers if p.score >= min_score or p.key in retry_keys]
                 if len(kept) != len(papers):
                     progress(f"[{topic.name}] 低于相关性阈值 {min_score} 被剔除：{len(papers) - len(kept)} 篇")
                 papers = kept

@@ -509,6 +509,24 @@ class Store:
                 out.append(paper)
         return out
 
+    def list_pending_papers(self, topic_id: int) -> list[Paper]:
+        """待补发的论文 —— **从库里取，不依赖今天有没有再抓到它**。
+
+        为什么必须这样：`filter_digest_pending` 只是对"今天抓回来的候选"做一次过滤，
+        它不是一个队列。而每日检索每天只回吐打分最高的前若干篇（`collect()` 的 limit），
+        一篇上次想发却没发出去的论文，很容易今天挤不进这个名单 —— 于是它就永远卡在
+        pending，用户永远收不到（真事故：一篇 Google Scholar 来的论文卡了 3 天）。
+        补发队列必须独立于"今天搜到什么"。
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT p.* FROM recommendations r JOIN papers p ON p.key = r.paper_key
+                   WHERE r.topic_id = ? AND r.status = 'pending'
+                   ORDER BY r.score DESC""",
+                (topic_id,),
+            ).fetchall()
+        return [_row_to_paper(row) for row in rows]
+
     def list_recommendations(self, topic_id: int, limit: int = 50) -> list[dict]:
         with self._lock:
             rows = self.conn.execute(
